@@ -5,6 +5,7 @@ use arboard::Clipboard;
 use clack_extensions::gui::*;
 use clack_plugin::prelude::*;
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const GUI_CONFIG: EmbeddedWebviewConfig = EmbeddedWebviewConfig {
@@ -40,6 +41,7 @@ impl MimiumPluginGui {
         let compile_feedback = Arc::clone(&shared.compile_feedback);
         let pending_program = Arc::clone(&shared.pending_program);
         let pending_ui_messages = Arc::clone(&shared.pending_ui_messages);
+        let state_dirty = Arc::clone(&shared.state_dirty);
         let host = unsafe { shared.host.with_arbitrary_lifetime() };
 
         let webview = EmbeddedWebviewGui::new(parent, &GUI_CONFIG, move |msg| {
@@ -54,6 +56,8 @@ impl MimiumPluginGui {
                     if let Ok(mut current) = current_source.lock() {
                         *current = source.clone();
                     }
+
+                    state_dirty.store(true, Ordering::SeqCst);
 
                     let feedback = match mimium::compile_program(&source) {
                         Ok(program) => {
