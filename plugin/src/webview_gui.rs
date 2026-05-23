@@ -17,6 +17,7 @@ window.addEventListener(
 );
 "#;
 
+
 pub struct EmbeddedWebviewConfig {
     pub width: u32,
     pub height: u32,
@@ -127,6 +128,7 @@ impl EmbeddedWebviewGui {
         }
 
         let webview = builder
+            .with_accept_first_mouse(true)
             .build_as_child(&parent_handle)
             .map_err(|_| PluginError::Message("Failed to create webview"))?;
 

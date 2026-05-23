@@ -1,6 +1,7 @@
 use crate::mimium::{self, CompileFeedback};
 use crate::webview_gui::{EmbeddedWebviewConfig, EmbeddedWebviewGui};
 use crate::{MimiumPluginMainThread, MimiumPluginShared};
+use arboard::Clipboard;
 use clack_extensions::gui::*;
 use clack_plugin::prelude::*;
 use serde::Serialize;
@@ -19,6 +20,12 @@ enum PluginMessage {
     EditorState {
         source: String,
         ok: bool,
+        message: String,
+    },
+    ClipboardReadResult {
+        request_id: String,
+        ok: bool,
+        text: Option<String>,
         message: String,
     },
 }
@@ -78,6 +85,40 @@ impl MimiumPluginGui {
                     queue_editor_state(&pending_ui_messages, &source, &feedback);
                     host.request_callback();
                 }
+                Some("clipboard_write") => {
+                    let text = msg
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    if let Ok(mut clipboard) = Clipboard::new() {
+                        let _ = clipboard.set_text(text);
+                    }
+                }
+                Some("clipboard_read") => {
+                    let request_id = msg
+                        .get("request_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    let result = Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.get_text())
+                        .map(|text| (true, Some(text), "Clipboard read succeeded.".to_string()))
+                        .unwrap_or_else(|error| {
+                            (false, None, format!("Clipboard read failed: {error}"))
+                        });
+
+                    queue_clipboard_read_result(
+                        &pending_ui_messages,
+                        &request_id,
+                        result.0,
+                        result.1,
+                        &result.2,
+                    );
+                    host.request_callback();
+                }
                 _ => {}
             }
         })?;
@@ -101,6 +142,25 @@ impl MimiumPluginGui {
             message: feedback.message.clone(),
         }) {
             self.send_raw_message(&json);
+        }
+    }
+}
+
+pub(crate) fn queue_clipboard_read_result(
+    queue: &std::sync::Mutex<Vec<String>>,
+    request_id: &str,
+    ok: bool,
+    text: Option<String>,
+    message: &str,
+) {
+    if let Ok(json) = serde_json::to_string(&PluginMessage::ClipboardReadResult {
+        request_id: request_id.to_string(),
+        ok,
+        text,
+        message: message.to_string(),
+    }) {
+        if let Ok(mut queue) = queue.lock() {
+            queue.push(json);
         }
     }
 }

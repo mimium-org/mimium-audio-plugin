@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+arboard = "3"
 clack-plugin = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18" }
 clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18", features = ["audio-ports", "clack-plugin", "gui"] }
 mimium-lang = { path = "../../mimium-rs/crates/lib/mimium-lang" }
@@ -14,4 +15,4 @@ raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-wry = { git = "https://github.com/tomoyanonymous/wry.git", rev = "bfe58714b9a20f8cceff62b82af60326546128ed" }
+wry = { git = "https://github.com/tomoyanonymous/wry.git", rev = "c94c79dc4502d02a964f370f7babcdcb25547485" }

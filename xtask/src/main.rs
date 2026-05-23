@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PRODUCT_SLUG: &str = "mimium-clap-plugin";
+const PRODUCT_NAME: &str = "Mimium CLAP Plugin";
 const CARGO_PACKAGE_NAME: &str = "mimium-clap-plugin";
+const BUNDLE_IDENTIFIER: &str = "org.mimium.mimium-clap-plugin";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BuildProfile {
@@ -28,11 +30,58 @@ impl BuildProfile {
             Self::Release => "release",
         }
     }
+
+    fn cmake_name(self) -> &'static str {
+        match self {
+            Self::Debug => "Debug",
+            Self::Release => "Release",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PackageFormat {
+    Clap,
+    Vst3,
+}
+
+impl PackageFormat {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "clap" => Ok(Self::Clap),
+            "vst3" => Ok(Self::Vst3),
+            other => Err(format!("unsupported format: {other}")),
+        }
+    }
+
+    fn target_name(self) -> Option<&'static str> {
+        match self {
+            Self::Clap => None,
+            Self::Vst3 => Some("mimium_clap_plugin_vst3"),
+        }
+    }
+
+    fn bundle_extension(self) -> &'static str {
+        match self {
+            Self::Clap => "clap",
+            Self::Vst3 => "vst3",
+        }
+    }
+
+    fn requires_wrapper(self) -> bool {
+        matches!(self, Self::Vst3)
+    }
 }
 
 struct Options {
     profile: BuildProfile,
+    formats: Vec<PackageFormat>,
     install: bool,
+}
+
+struct BuiltArtifact {
+    format: PackageFormat,
+    path: PathBuf,
 }
 
 fn main() {
@@ -63,13 +112,26 @@ fn run() -> Result<(), String> {
 
 fn parse_package_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut profile = BuildProfile::Release;
+    let mut formats = Vec::new();
     let mut install = false;
+    let mut iter = args.peekable();
 
-    for arg in args {
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--release" => profile = BuildProfile::Release,
             "--debug" => profile = BuildProfile::Debug,
             "--install" => install = true,
+            "--all-formats" => {
+                push_format(&mut formats, PackageFormat::Clap);
+                push_format(&mut formats, PackageFormat::Vst3);
+            }
+            "--format" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--format requires a value".to_string())?;
+                let format = PackageFormat::parse(&value)?;
+                push_format(&mut formats, format);
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -78,30 +140,57 @@ fn parse_package_args(args: impl Iterator<Item = String>) -> Result<Options, Str
         }
     }
 
-    Ok(Options { profile, install })
+    if formats.is_empty() {
+        formats.push(PackageFormat::Clap);
+    }
+
+    Ok(Options {
+        profile,
+        formats,
+        install,
+    })
 }
 
 fn package(options: Options) -> Result<(), String> {
     let workspace_root = workspace_root()?;
     let target_root = workspace_root.join("target");
     let package_dir = target_root.join("package").join(options.profile.dir_name());
+    let wrapper_stage_dir = target_root.join("wrapper-stage").join(options.profile.dir_name());
+    let wrapper_build_dir = target_root.join("wrapper-build").join(options.profile.dir_name());
 
     cargo_build_plugin(&workspace_root, options.profile)?;
     let clap_binary = built_clap_binary_path(&workspace_root, options.profile)?;
 
-    fs::create_dir_all(&package_dir).map_err(io_error)?;
-    let artifact_path = package_dir.join(format!("{PRODUCT_SLUG}.clap"));
+    let clap_artifact = if options.formats.contains(&PackageFormat::Clap) {
+        Some(stage_clap_artifact(&clap_binary, &package_dir)?)
+    } else {
+        None
+    };
 
-    if artifact_path.exists() {
-        remove_path_if_exists(&artifact_path)?;
+    let clap_bundle = if options.formats.iter().any(|format| format.requires_wrapper()) {
+        Some(stage_clap_bundle(&clap_binary, &wrapper_stage_dir)?)
+    } else {
+        None
+    };
+
+    if options.formats.iter().any(|format| format.requires_wrapper()) {
+        let bundle = clap_bundle
+            .as_deref()
+            .ok_or_else(|| "missing staged CLAP bundle for wrapper build".to_string())?;
+        configure_wrapper_project(&workspace_root, &wrapper_build_dir, bundle, options.profile)?;
+        build_wrapper_targets(&wrapper_build_dir, &options.formats, options.profile)?;
+        sync_embedded_clap_bundles(&wrapper_build_dir, bundle, &options.formats)?;
     }
-    fs::copy(&clap_binary, &artifact_path).map_err(io_error)?;
 
-    println!("built clap: {}", artifact_path.display());
+    let artifacts = collect_artifacts(clap_artifact.as_deref(), &wrapper_build_dir, &options.formats)?;
 
     if options.install {
-        install_artifact(&artifact_path)?;
-        println!("installed clap into ~/Library/Audio/Plug-Ins/CLAP");
+        install_artifacts(&artifacts)?;
+        println!("installed packaged plugins into ~/Library/Audio/Plug-Ins");
+    }
+
+    for artifact in &artifacts {
+        println!("built {}: {}", artifact.format.bundle_extension(), artifact.path.display());
     }
 
     Ok(())
@@ -133,8 +222,234 @@ fn built_clap_binary_path(workspace_root: &Path, profile: BuildProfile) -> Resul
     Ok(artifact_path)
 }
 
-fn install_artifact(artifact_path: &Path) -> Result<(), String> {
-    let install_root = home_dir()?.join("Library").join("Audio").join("Plug-Ins").join("CLAP");
+fn stage_clap_artifact(clap_binary: &Path, package_dir: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(package_dir).map_err(io_error)?;
+    let artifact_path = package_dir.join(format!("{PRODUCT_SLUG}.clap"));
+    if artifact_path.exists() {
+        remove_path_if_exists(&artifact_path)?;
+    }
+    fs::copy(clap_binary, &artifact_path).map_err(io_error)?;
+    Ok(artifact_path)
+}
+
+fn stage_clap_bundle(clap_binary: &Path, wrapper_stage_dir: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle_dir = wrapper_stage_dir.join(format!("{PRODUCT_NAME}.clap"));
+        let contents_dir = bundle_dir.join("Contents");
+        let macos_dir = contents_dir.join("MacOS");
+        let plist_path = contents_dir.join("Info.plist");
+        fs::create_dir_all(&macos_dir).map_err(io_error)?;
+
+        let entrypoint = macos_dir.join(PRODUCT_SLUG);
+        if entrypoint.exists() {
+            remove_path_if_exists(&entrypoint)?;
+        }
+        fs::copy(clap_binary, &entrypoint).map_err(io_error)?;
+        fs::write(plist_path, clap_info_plist()).map_err(io_error)?;
+        Ok(bundle_dir)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::create_dir_all(wrapper_stage_dir).map_err(io_error)?;
+        let staged = wrapper_stage_dir.join(format!("{PRODUCT_SLUG}.clap"));
+        if staged.exists() {
+            remove_path_if_exists(&staged)?;
+        }
+        fs::copy(clap_binary, &staged).map_err(io_error)?;
+        Ok(staged)
+    }
+}
+
+fn clap_info_plist() -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>CFBundleDevelopmentRegion</key>\n  <string>en</string>\n  <key>CFBundleExecutable</key>\n  <string>{PRODUCT_SLUG}</string>\n  <key>CFBundleIdentifier</key>\n  <string>{BUNDLE_IDENTIFIER}.clap</string>\n  <key>CFBundleName</key>\n  <string>{PRODUCT_NAME}</string>\n  <key>CFBundlePackageType</key>\n  <string>BNDL</string>\n  <key>CFBundleShortVersionString</key>\n  <string>{}</string>\n  <key>CFBundleVersion</key>\n  <string>{}</string>\n</dict>\n</plist>\n",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn configure_wrapper_project(
+    workspace_root: &Path,
+    wrapper_build_dir: &Path,
+    clap_bundle: &Path,
+    profile: BuildProfile,
+) -> Result<(), String> {
+    fs::create_dir_all(wrapper_build_dir).map_err(io_error)?;
+
+    let clap_wrapper_root = clap_wrapper_root(workspace_root)?;
+    let packaging_dir = workspace_root.join("packaging").join("clap-wrapper");
+
+    let mut command = Command::new("cmake");
+    command
+        .arg("-S")
+        .arg(&packaging_dir)
+        .arg("-B")
+        .arg(wrapper_build_dir)
+        .arg(format!("-DCLAP_WRAPPER_ROOT={}", clap_wrapper_root.display()))
+        .arg(format!("-DCLAP_PLUGIN_BUNDLE={}", clap_bundle.display()))
+        .arg(format!("-DCLAP_WRAPPER_OUTPUT_NAME={PRODUCT_NAME}"))
+        .arg(format!("-DCLAP_WRAPPER_BUNDLE_IDENTIFIER={BUNDLE_IDENTIFIER}"))
+        .arg("-DCLAP_WRAPPER_DOWNLOAD_DEPENDENCIES=TRUE");
+
+    if let Some(clap_sdk_root) = env::var_os("CLAP_SDK_ROOT") {
+        command.arg(format!(
+            "-DCLAP_SDK_ROOT={}",
+            PathBuf::from(clap_sdk_root).display()
+        ));
+    }
+
+    if let Some(vst3_sdk_root) = env::var_os("VST3_SDK_ROOT") {
+        command.arg(format!(
+            "-DVST3_SDK_ROOT={}",
+            PathBuf::from(vst3_sdk_root).display()
+        ));
+    }
+
+    if cfg!(target_os = "macos") {
+        command.arg(format!("-DCMAKE_BUILD_TYPE={}", profile.cmake_name()));
+    }
+
+    run_command(command, "cmake configure")
+}
+
+fn build_wrapper_targets(
+    wrapper_build_dir: &Path,
+    formats: &[PackageFormat],
+    profile: BuildProfile,
+) -> Result<(), String> {
+    let mut names = formats.iter().filter_map(|f| f.target_name()).peekable();
+    if names.peek().is_none() {
+        return Ok(());
+    }
+
+    let mut command = Command::new("cmake");
+    command.arg("--build").arg(wrapper_build_dir);
+
+    if cfg!(target_os = "windows") {
+        command.arg("--config").arg(profile.cmake_name());
+    }
+
+    command.arg("--target");
+    for name in names {
+        command.arg(name);
+    }
+
+    run_command(command, "cmake build")
+}
+
+fn collect_artifacts(
+    clap_artifact: Option<&Path>,
+    wrapper_build_dir: &Path,
+    formats: &[PackageFormat],
+) -> Result<Vec<BuiltArtifact>, String> {
+    let mut artifacts = Vec::new();
+
+    for format in formats {
+        match format {
+            PackageFormat::Clap => {
+                let path = clap_artifact
+                    .ok_or_else(|| "requested clap artifact is missing".to_string())?
+                    .to_path_buf();
+                artifacts.push(BuiltArtifact {
+                    format: *format,
+                    path,
+                });
+            }
+            PackageFormat::Vst3 => {
+                let path = find_first_matching_artifact(wrapper_build_dir, "vst3")?
+                    .ok_or_else(|| "failed to locate built VST3 bundle".to_string())?;
+                artifacts.push(BuiltArtifact {
+                    format: *format,
+                    path,
+                });
+            }
+        }
+    }
+
+    Ok(artifacts)
+}
+
+fn sync_embedded_clap_bundles(
+    wrapper_build_dir: &Path,
+    clap_bundle: &Path,
+    formats: &[PackageFormat],
+) -> Result<(), String> {
+    for format in formats {
+        if !format.requires_wrapper() {
+            continue;
+        }
+
+        let wrapper_bundle =
+            wrapper_build_dir.join(format!("{PRODUCT_NAME}.{}", format.bundle_extension()));
+        if !wrapper_bundle.exists() {
+            continue;
+        }
+
+        let embedded_bundle = wrapper_bundle
+            .join("Contents")
+            .join("PlugIns")
+            .join(format!("{PRODUCT_NAME}.clap"));
+
+        if embedded_bundle.exists() {
+            remove_path_if_exists(&embedded_bundle)?;
+        }
+        copy_dir_recursive(clap_bundle, &embedded_bundle)?;
+    }
+
+    Ok(())
+}
+
+fn find_first_matching_artifact(dir: &Path, extension: &str) -> Result<Option<PathBuf>, String> {
+    let mut stack = vec![dir.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries {
+            let entry = entry.map_err(io_error)?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(io_error)?;
+
+            let has_target_extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension));
+
+            if has_target_extension {
+                return Ok(Some(path));
+            }
+
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn install_artifacts(artifacts: &[BuiltArtifact]) -> Result<(), String> {
+    for artifact in artifacts {
+        match artifact.format {
+            PackageFormat::Clap => install_artifact_into(&artifact.path, "CLAP")?,
+            PackageFormat::Vst3 => install_artifact_into(&artifact.path, "VST3")?,
+        }
+    }
+    Ok(())
+}
+
+fn install_artifact_into(artifact_path: &Path, install_dir: &str) -> Result<(), String> {
+    let install_root = home_dir()?
+        .join("Library")
+        .join("Audio")
+        .join("Plug-Ins")
+        .join(install_dir);
     fs::create_dir_all(&install_root).map_err(io_error)?;
     let destination = install_root.join(
         artifact_path
@@ -145,7 +460,31 @@ fn install_artifact(artifact_path: &Path) -> Result<(), String> {
     if destination.exists() {
         remove_path_if_exists(&destination)?;
     }
-    fs::copy(artifact_path, &destination).map_err(io_error)?;
+
+    if artifact_path.is_dir() {
+        copy_dir_recursive(artifact_path, &destination)?;
+    } else {
+        fs::copy(artifact_path, &destination).map_err(io_error)?;
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(io_error)?;
+
+    for entry in fs::read_dir(src).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type().map_err(io_error)?;
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).map_err(io_error)?;
+        }
+    }
 
     Ok(())
 }
@@ -197,6 +536,26 @@ fn load_dotenv(workspace_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn clap_wrapper_root(workspace_root: &Path) -> Result<PathBuf, String> {
+    if let Some(value) = env::var_os("CLAP_WRAPPER_ROOT") {
+        let path = PathBuf::from(value);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(format!("CLAP_WRAPPER_ROOT does not exist: {}", path.display()));
+    }
+
+    let default = workspace_root.join("third_party").join("clap-wrapper");
+    if default.exists() {
+        Ok(default)
+    } else {
+        Err(format!(
+            "clap-wrapper not found. Set CLAP_WRAPPER_ROOT or place it at {}",
+            default.display()
+        ))
+    }
+}
+
 fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -214,9 +573,15 @@ fn io_error(error: io::Error) -> String {
     error.to_string()
 }
 
+fn push_format(formats: &mut Vec<PackageFormat>, format: PackageFormat) {
+    if !formats.contains(&format) {
+        formats.push(format);
+    }
+}
+
 fn print_usage() {
     println!(
-        "Usage:\n  cargo xtask package [--release|--debug] [--install]\n\nCommands:\n  package     Build and stage a .clap plugin binary"
+        "Usage:\n  cargo xtask package [--release|--debug] [--format clap|vst3] [--all-formats] [--install]\n\nCommands:\n  package     Build and stage plugin artifacts (.clap and/or .vst3)"
     );
 }
 

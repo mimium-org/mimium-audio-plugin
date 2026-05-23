@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import * as monaco from "monaco-editor";
 import { LANGUAGE_ID, registerMimiumLanguage } from "./editor/language";
 import { registerThemes } from "./editor/themes";
-import { onPluginMessage, requestState, setSource } from "./ipc";
+import {
+  onPluginMessage,
+  requestClipboardRead,
+  requestState,
+  setSource,
+  writeClipboardText,
+} from "./ipc";
 
 self.MonacoEnvironment = {
   getWorker(_moduleId: string, _label: string) {
@@ -40,6 +46,7 @@ function App() {
       value: source,
       language: LANGUAGE_ID,
       theme: "mimium-copper",
+      dragAndDrop: false,
       fontFamily: "'Iosevka Comfy', 'Fira Code', 'JetBrains Mono', monospace",
       fontLigatures: true,
       minimap: { enabled: false },
@@ -57,18 +64,130 @@ function App() {
         verticalScrollbarSize: 9,
         horizontalScrollbarSize: 9,
       },
+      mouseStyle: "text",
+      contextmenu: false,
     });
+
+    let dragAnchor: monaco.Position | null = null;
+
+    const updateDragSelection = (clientX: number, clientY: number) => {
+      if (!dragAnchor) {
+        return;
+      }
+
+      const target = editor.getTargetAtClientPoint(clientX, clientY);
+      const position = target?.position;
+      if (!position) {
+        return;
+      }
+
+      editor.setSelection(
+        new monaco.Selection(
+          dragAnchor.lineNumber,
+          dragAnchor.column,
+          position.lineNumber,
+          position.column
+        )
+      );
+    };
+
+    const mouseDownDisposable = editor.onMouseDown((event) => {
+      if (event.event.leftButton && event.target.position) {
+        dragAnchor = event.target.position;
+      }
+    });
+
+    const mouseUpDisposable = editor.onMouseUp(() => {
+      dragAnchor = null;
+    });
+
+    const handleWindowMouseMove = (event: MouseEvent) => {
+      if (!dragAnchor) {
+        return;
+      }
+
+      if ((event.buttons & 1) === 0) {
+        dragAnchor = null;
+        return;
+      }
+
+      updateDragSelection(event.clientX, event.clientY);
+    };
+
+    const handleWindowMouseUp = () => {
+      dragAnchor = null;
+    };
+
+    window.addEventListener("mousemove", handleWindowMouseMove, true);
+    window.addEventListener("mouseup", handleWindowMouseUp, true);
 
     const disposable = editor.onDidChangeModelContent(() => {
       setSourceText(editor.getValue());
     });
 
+    let pendingPasteRequestId: string | null = null;
+
+    const insertTextAtSelection = (text: string) => {
+      const selection = editor.getSelection();
+      if (!selection) {
+        return;
+      }
+      editor.executeEdits("clipboard-paste", [{ range: selection, text }]);
+    };
+
+    const writeSelectionToClipboard = () => {
+      const selection = editor.getSelection();
+      if (!selection || selection.isEmpty()) {
+        return false;
+      }
+
+      const text = editor.getModel()?.getValueInRange(selection) ?? "";
+      if (text.length === 0) {
+        return false;
+      }
+
+      writeClipboardText(text);
+      return true;
+    };
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC, () => {
+      writeSelectionToClipboard();
+    });
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyX, () => {
+      const selection = editor.getSelection();
+      if (!selection || selection.isEmpty()) {
+        return;
+      }
+
+      if (writeSelectionToClipboard()) {
+        editor.executeEdits("clipboard-cut", [{ range: selection, text: "" }]);
+      }
+    });
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV, () => {
+      const requestId = `paste-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      pendingPasteRequestId = requestId;
+      requestClipboardRead(requestId);
+    });
+
     requestState();
 
     const unsubscribe = onPluginMessage((message) => {
+      if (message.type === "clipboard_read_result") {
+        if (message.request_id === pendingPasteRequestId) {
+          pendingPasteRequestId = null;
+          if (message.ok && typeof message.text === "string") {
+            insertTextAtSelection(message.text);
+          }
+        }
+        return;
+      }
+
       if (message.type !== "editor_state") {
         return;
       }
+
       setStatus(message.message);
       setIsCompiling(false);
 
@@ -82,6 +201,10 @@ function App() {
     });
 
     return () => {
+      window.removeEventListener("mousemove", handleWindowMouseMove, true);
+      window.removeEventListener("mouseup", handleWindowMouseUp, true);
+      mouseDownDisposable.dispose();
+      mouseUpDisposable.dispose();
       unsubscribe();
       disposable.dispose();
       editor.dispose();

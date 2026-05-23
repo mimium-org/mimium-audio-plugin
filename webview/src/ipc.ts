@@ -14,14 +14,30 @@ export type PluginCommand =
     }
   | {
       type: "request_state";
+    }
+  | {
+      type: "clipboard_write";
+      text: string;
+    }
+  | {
+      type: "clipboard_read";
+      request_id: string;
     };
 
-export type PluginMessage = {
-  type: "editor_state";
-  source: string;
-  ok: boolean;
-  message: string;
-};
+export type PluginMessage =
+  | {
+      type: "editor_state";
+      source: string;
+      ok: boolean;
+      message: string;
+    }
+  | {
+      type: "clipboard_read_result";
+      request_id: string;
+      ok: boolean;
+      text: string | null;
+      message: string;
+    };
 
 type PluginMessageCallback = (message: PluginMessage) => void;
 
@@ -50,6 +66,14 @@ export function setSource(source: string): void {
 
 export function requestState(): void {
   sendToPlugin({ type: "request_state" });
+}
+
+export function writeClipboardText(text: string): void {
+  sendToPlugin({ type: "clipboard_write", text });
+}
+
+export function requestClipboardRead(requestId: string): void {
+  sendToPlugin({ type: "clipboard_read", request_id: requestId });
 }
 
 export function onPluginMessage(callback: PluginMessageCallback): () => void {
