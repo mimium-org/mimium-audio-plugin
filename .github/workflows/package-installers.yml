@@ -57,7 +57,7 @@ jobs:
         run: git clone --depth 1 https://github.com/free-audio/clap-wrapper.git third_party/clap-wrapper
 
       - name: Build plugin packages
-        run: cargo run -p xtask -- package --release --all-formats
+        run: cargo run --manifest-path xtask/Cargo.toml -- package --release --all-formats
 
       - name: Install WiX Toolset
         run: |
@@ -135,7 +135,7 @@ jobs:
         run: git clone --depth 1 https://github.com/free-audio/clap-wrapper.git third_party/clap-wrapper
 
       - name: Build plugin packages
-        run: cargo run -p xtask -- package --release --all-formats
+        run: cargo run --manifest-path xtask/Cargo.toml -- package --release --all-formats
 
       - name: Determine version
         id: version
