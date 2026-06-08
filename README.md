@@ -1,52 +1,78 @@
 # mimium-audio-plugin
 
-Rust + Clack + Wry 構成の CLAP プラグインです。Webview 上の Monaco editor で mimium ソースを編集し、mimium-rs の Wasm JIT バックエンドでコンパイルしたプログラムをオーディオスレッドで実行します。
+This is a CLAP plugin built with Rust, Clack, and Wry. You edit mimium source code in a Monaco editor running in a webview, then compile and run it on the audio thread via the mimium-rs Wasm JIT backend.
 
-## 構成
+## Structure
 
-- `plugin/`: CLAP プラグイン本体（Rust）
-- `webview/`: Vite + React + Monaco の UI
-- `xtask/`: `.clap` を生成する補助コマンド
-- `packaging/clap-wrapper/`: clap-wrapper 用の CMake 設定
+- `plugin/`: CLAP plugin implementation (Rust)
+- `webview/`: UI built with Vite + React + Monaco
+- `xtask/`: helper command for building packaged plugin artifacts
+- `packaging/clap-wrapper/`: CMake configuration for clap-wrapper
 
-## 開発
+## Development
 
-1. `webview` の dev server 起動
+1. Start the webview dev server:
    - `cd webview && pnpm dev`
-2. Rust 側ビルド
+2. Build the Rust side:
    - `cargo build`
 
-Debug ビルド時の GUI は `http://localhost:5173` を参照します。
+In debug builds, the GUI points to `http://localhost:5173`.
 
-## パッケージ
+## Packaging
 
-`.clap` 生成:
+Build `.clap`:
 
 - `cargo run -p xtask -- package --release`
 
-生成物は `target/package/release/mimium-clap-plugin.clap` に配置されます。
+The output is placed at `target/package/release/mimium-audio-plugin.clap`.
 
-`clap-wrapper` 経由で `.vst3` 生成:
+Build `.vst3` via `clap-wrapper`:
 
 - `cargo run -p xtask -- package --release --format vst3`
 
-`.clap` と `.vst3` を同時生成:
+Build `.component` (AUv2) on macOS:
+
+- `cargo run -p xtask -- package --release --format au`
+
+Build `.clap` and `.vst3` together:
 
 - `cargo run -p xtask -- package --release --all-formats`
 
-### clap-wrapper の場所
+On macOS, `--all-formats` builds `.clap`, `.vst3`, and `.component` together.
 
-`xtask` は以下の優先順で `clap-wrapper` を探します。
+### clap-wrapper location
 
-1. 環境変数 `CLAP_WRAPPER_ROOT`
+`xtask` looks for `clap-wrapper` in this order:
+
+1. Environment variable `CLAP_WRAPPER_ROOT`
 2. `third_party/clap-wrapper`
 
-例:
+Example:
 
 - `export CLAP_WRAPPER_ROOT=/path/to/clap-wrapper`
 
-### clap-host でロードするときの注意
+### Notes for loading in clap-host
 
-- `clap-host` が直接ロードできるのは CLAP 形式のみです（VST3 は不可）。
-- 読み込み対象には `target/package/release/mimium-clap-plugin.clap` を使ってください。
-- `target/wrapper-stage/release/Mimium CLAP Plugin.clap` は clap-wrapper 内部ステージ用のバンドルディレクトリです。`clap-host` に渡すと「The shared library was not found.」が出ることがあります。
+- `clap-host` can load CLAP format only (not VST3).
+- Use `target/package/release/mimium-audio-plugin.clap` as the file to load.
+- `target/wrapper-stage/release/Mimium Audio Plugin.clap` is an internal staging bundle for clap-wrapper. Passing it to `clap-host` can cause `The shared library was not found.`.
+
+## GitHub Actions Packaging
+
+The installer build workflow is defined in [package-installers.yml](.github/workflows/package-installers.yml).
+
+- Windows: builds `.msi` and installs into `Common Files/CLAP` and `Common Files/VST3`
+- macOS: builds `.pkg` and installs into `/Library/Audio/Plug-Ins/CLAP`, `/Library/Audio/Plug-Ins/VST3`, and `/Library/Audio/Plug-Ins/Components`
+- The macOS workflow signs when Apple certificates are provided, and runs notarize + staple when notarization secrets are configured
+
+Secrets used for macOS signing and notarization:
+
+- `APPLE_CERTIFICATES_P12_BASE64`
+- `APPLE_CERTIFICATES_P12_PASSWORD`
+- `APPLE_APPLICATION_SIGNING_IDENTITY`
+- `APPLE_INSTALLER_SIGNING_IDENTITY`
+- `APPLE_NOTARY_APPLE_ID`
+- `APPLE_NOTARY_TEAM_ID`
+- `APPLE_NOTARY_PASSWORD`
+
+The Apple `.p12` is expected to include both `Developer ID Application` and `Developer ID Installer` certificates.

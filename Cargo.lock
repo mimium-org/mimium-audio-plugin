@@ -1955,7 +1955,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mimium-clap-plugin"
+name = "mimium-audio-plugin"
 version = "0.1.0"
 dependencies = [
  "arboard",
@@ -1973,7 +1973,9 @@ dependencies = [
 
 [[package]]
 name = "mimium-lang"
-version = "4.1.0"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8cfd9c2d7ed67818848d844c04aab4ea2297bd3aca200dac82d8b46bdd2475b"
 dependencies = [
  "ariadne",
  "bincode",
@@ -1999,7 +2001,9 @@ dependencies = [
 
 [[package]]
 name = "mimium-plugin-macros"
-version = "4.1.0"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d3eec3793e5aa0b4dcabe59125e4927d5978d775b1a740e2c67c4ffe5d95521"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2936,7 +2940,9 @@ dependencies = [
 
 [[package]]
 name = "state-tree"
-version = "4.1.0"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "604d5c2195d05dffac722de6d3975e85ec93eab90669f6cad34b9dd4388fe203"
 dependencies = [
  "itertools 0.13.0",
  "log",

@@ -4,7 +4,7 @@ if(WIN32 AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
-project(mimium_clap_plugin_wrappers LANGUAGES C CXX)
+project(mimium_audio_plugin_wrappers LANGUAGES C CXX)
 
 if(APPLE)
     enable_language(OBJC)
@@ -31,11 +31,11 @@ if(NOT EXISTS "${CLAP_PLUGIN_BUNDLE}")
 endif()
 
 if(NOT DEFINED CLAP_WRAPPER_OUTPUT_NAME)
-    set(CLAP_WRAPPER_OUTPUT_NAME "Mimium CLAP Plugin")
+    set(CLAP_WRAPPER_OUTPUT_NAME "Mimium Audio Plugin")
 endif()
 
 if(NOT DEFINED CLAP_WRAPPER_BUNDLE_IDENTIFIER)
-    set(CLAP_WRAPPER_BUNDLE_IDENTIFIER "org.mimium.mimium-clap-plugin")
+    set(CLAP_WRAPPER_BUNDLE_IDENTIFIER "org.mimium.mimium-audio-plugin")
 endif()
 
 if(NOT DEFINED CLAP_WRAPPER_BUNDLE_VERSION)
@@ -46,9 +46,9 @@ option(CLAP_WRAPPER_BUILD_AUV2 "Build the AUv2 wrapper target" OFF)
 
 add_subdirectory("${CLAP_WRAPPER_ROOT}" "${CMAKE_BINARY_DIR}/clap-wrapper" EXCLUDE_FROM_ALL)
 
-add_library(mimium_clap_plugin_vst3 MODULE)
+add_library(mimium_audio_plugin_vst3 MODULE)
 target_add_vst3_wrapper(
-    TARGET mimium_clap_plugin_vst3
+    TARGET mimium_audio_plugin_vst3
     OUTPUT_NAME "${CLAP_WRAPPER_OUTPUT_NAME}"
     BUNDLE_IDENTIFIER "${CLAP_WRAPPER_BUNDLE_IDENTIFIER}.vst3"
     BUNDLE_VERSION "${CLAP_WRAPPER_BUNDLE_VERSION}"
@@ -72,9 +72,9 @@ if(APPLE AND CLAP_WRAPPER_BUILD_AUV2)
         message(FATAL_ERROR "CLAP_WRAPPER_AUV2_INSTRUMENT_TYPE is required when CLAP_WRAPPER_BUILD_AUV2=ON")
     endif()
 
-    add_library(mimium_clap_plugin_auv2 MODULE)
+    add_library(mimium_audio_plugin_auv2 MODULE)
     target_add_auv2_wrapper(
-        TARGET mimium_clap_plugin_auv2
+        TARGET mimium_audio_plugin_auv2
         OUTPUT_NAME "${CLAP_WRAPPER_OUTPUT_NAME}"
         BUNDLE_IDENTIFIER "${CLAP_WRAPPER_BUNDLE_IDENTIFIER}.auv2"
         BUNDLE_VERSION "${CLAP_WRAPPER_BUNDLE_VERSION}"

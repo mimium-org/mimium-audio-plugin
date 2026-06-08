@@ -1,0 +1,155 @@
+name: Package Installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  workflow_call:
+    secrets:
+      APPLE_CERTIFICATES_P12_BASE64:
+        required: false
+      APPLE_CERTIFICATES_P12_PASSWORD:
+        required: false
+      APPLE_APPLICATION_SIGNING_IDENTITY:
+        required: false
+      APPLE_INSTALLER_SIGNING_IDENTITY:
+        required: false
+      APPLE_NOTARY_APPLE_ID:
+        required: false
+      APPLE_NOTARY_TEAM_ID:
+        required: false
+      APPLE_NOTARY_PASSWORD:
+        required: false
+
+jobs:
+  windows:
+    name: Windows MSI
+    runs-on: windows-2022
+    env:
+      CLAP_WRAPPER_ROOT: ${{ github.workspace }}\third_party\clap-wrapper
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webview/pnpm-lock.yaml
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install webview dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: webview
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch clap-wrapper
+        run: git clone --depth 1 https://github.com/free-audio/clap-wrapper.git third_party/clap-wrapper
+
+      - name: Build plugin packages
+        run: cargo run -p xtask -- package --release --all-formats
+
+      - name: Install WiX Toolset
+        run: |
+          choco install wixtoolset --version=3.14.1 -y
+          Add-Content $env:GITHUB_PATH 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
+        shell: pwsh
+
+      - name: Determine version
+        id: version
+        run: |
+          $version = (Select-String -Path plugin/Cargo.toml -Pattern '^version\s*=\s*"(.+)"$').Matches[0].Groups[1].Value
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Build MSI installer
+        run: ./packaging/windows/build-msi.ps1 -Version ${{ steps.version.outputs.value }}
+        shell: pwsh
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mimium-audio-plugin-windows-packages
+          path: |
+            target/package/release/*
+            target/installer/windows/*.msi
+
+  macos:
+    name: macOS PKG
+    runs-on: macos-14
+    env:
+      CLAP_WRAPPER_ROOT: ${{ github.workspace }}/third_party/clap-wrapper
+      APPLE_APPLICATION_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
+      APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
+      APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+      APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+      APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+      HAS_APPLE_CERTIFICATES: ${{ secrets.APPLE_CERTIFICATES_P12_BASE64 != '' }}
+      CLAP_WRAPPER_AUV2_MANUFACTURER_NAME: Mimium
+      CLAP_WRAPPER_AUV2_MANUFACTURER_CODE: Mimi
+      CLAP_WRAPPER_AUV2_SUBTYPE_CODE: Mclp
+      CLAP_WRAPPER_AUV2_INSTRUMENT_TYPE: aumu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import Apple signing certificates
+        if: env.HAS_APPLE_CERTIFICATES == 'true'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATES_P12_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATES_P12_PASSWORD }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webview/pnpm-lock.yaml
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install webview dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: webview
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch clap-wrapper
+        run: git clone --depth 1 https://github.com/free-audio/clap-wrapper.git third_party/clap-wrapper
+
+      - name: Build plugin packages
+        run: cargo run -p xtask -- package --release --all-formats
+
+      - name: Determine version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' plugin/Cargo.toml | head -n 1)
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build PKG installer
+        run: bash ./packaging/macos/build-pkg.sh ${{ steps.version.outputs.value }}
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mimium-audio-plugin-macos-packages
+          path: |
+            target/package/release/*
+            target/installer/macos/*.pkg

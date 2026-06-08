@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="Mimium Audio Plugin"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="mimium"
+    UpgradeCode="3C77A038-8A37-4348-BB84-45A2C452A64B">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Feature Id="MainFeature" Title="Mimium Audio Plugin" Level="1">
+      <ComponentGroupRef Id="PluginFiles" />
+    </Feature>
+  </Product>
+</Wix>

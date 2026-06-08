@@ -49,7 +49,7 @@ impl DefaultPluginFactory for MimiumPlugin {
     fn get_descriptor() -> PluginDescriptor {
         use clack_plugin::plugin::features::*;
 
-        PluginDescriptor::new("org.mimium.mimium-clap-plugin", "Mimium CLAP Plugin")
+        PluginDescriptor::new("org.mimium.mimium-audio-plugin", "Mimium Audio Plugin")
             .with_features([SYNTHESIZER, STEREO, INSTRUMENT])
     }
 

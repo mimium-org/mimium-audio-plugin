@@ -5,10 +5,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PRODUCT_SLUG: &str = "mimium-clap-plugin";
-const PRODUCT_NAME: &str = "Mimium CLAP Plugin";
-const CARGO_PACKAGE_NAME: &str = "mimium-clap-plugin";
-const BUNDLE_IDENTIFIER: &str = "org.mimium.mimium-clap-plugin";
+const PRODUCT_SLUG: &str = "mimium-audio-plugin";
+const PRODUCT_NAME: &str = "Mimium Audio Plugin";
+const CARGO_PACKAGE_NAME: &str = "mimium-audio-plugin";
+const BUNDLE_IDENTIFIER: &str = "org.mimium.mimium-audio-plugin";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BuildProfile {
@@ -43,6 +43,7 @@ impl BuildProfile {
 enum PackageFormat {
     Clap,
     Vst3,
+    Au,
 }
 
 impl PackageFormat {
@@ -50,6 +51,7 @@ impl PackageFormat {
         match value {
             "clap" => Ok(Self::Clap),
             "vst3" => Ok(Self::Vst3),
+            "au" => Ok(Self::Au),
             other => Err(format!("unsupported format: {other}")),
         }
     }
@@ -57,7 +59,8 @@ impl PackageFormat {
     fn target_name(self) -> Option<&'static str> {
         match self {
             Self::Clap => None,
-            Self::Vst3 => Some("mimium_clap_plugin_vst3"),
+            Self::Vst3 => Some("mimium_audio_plugin_vst3"),
+            Self::Au => Some("mimium_audio_plugin_auv2"),
         }
     }
 
@@ -65,11 +68,20 @@ impl PackageFormat {
         match self {
             Self::Clap => "clap",
             Self::Vst3 => "vst3",
+            Self::Au => "component",
         }
     }
 
     fn requires_wrapper(self) -> bool {
-        matches!(self, Self::Vst3)
+        matches!(self, Self::Vst3 | Self::Au)
+    }
+
+    fn install_dir(self) -> &'static str {
+        match self {
+            Self::Clap => "CLAP",
+            Self::Vst3 => "VST3",
+            Self::Au => "Components",
+        }
     }
 }
 
@@ -124,6 +136,9 @@ fn parse_package_args(args: impl Iterator<Item = String>) -> Result<Options, Str
             "--all-formats" => {
                 push_format(&mut formats, PackageFormat::Clap);
                 push_format(&mut formats, PackageFormat::Vst3);
+                if cfg!(target_os = "macos") {
+                    push_format(&mut formats, PackageFormat::Au);
+                }
             }
             "--format" => {
                 let value = iter
@@ -152,6 +167,10 @@ fn parse_package_args(args: impl Iterator<Item = String>) -> Result<Options, Str
 }
 
 fn package(options: Options) -> Result<(), String> {
+    if !cfg!(target_os = "macos") && options.formats.contains(&PackageFormat::Au) {
+        return Err("au packaging is only supported on macOS".to_string());
+    }
+
     let workspace_root = workspace_root()?;
     let target_root = workspace_root.join("target");
     let package_dir = target_root.join("package").join(options.profile.dir_name());
@@ -178,12 +197,23 @@ fn package(options: Options) -> Result<(), String> {
         let bundle = clap_bundle
             .as_deref()
             .ok_or_else(|| "missing staged CLAP bundle for wrapper build".to_string())?;
-        configure_wrapper_project(&workspace_root, &wrapper_build_dir, bundle, options.profile)?;
+        configure_wrapper_project(
+            &workspace_root,
+            &wrapper_build_dir,
+            bundle,
+            &options.formats,
+            options.profile,
+        )?;
         build_wrapper_targets(&wrapper_build_dir, &options.formats, options.profile)?;
         sync_embedded_clap_bundles(&wrapper_build_dir, bundle, &options.formats)?;
     }
 
-    let artifacts = collect_artifacts(clap_artifact.as_deref(), &wrapper_build_dir, &options.formats)?;
+    let artifacts = collect_artifacts(
+        clap_artifact.as_deref(),
+        &wrapper_build_dir,
+        &package_dir,
+        &options.formats,
+    )?;
 
     if options.install {
         install_artifacts(&artifacts)?;
@@ -239,13 +269,33 @@ fn built_clap_binary_path(workspace_root: &Path, profile: BuildProfile) -> Resul
 }
 
 fn stage_clap_artifact(clap_binary: &Path, package_dir: &Path) -> Result<PathBuf, String> {
-    fs::create_dir_all(package_dir).map_err(io_error)?;
-    let artifact_path = package_dir.join(format!("{PRODUCT_SLUG}.clap"));
-    if artifact_path.exists() {
-        remove_path_if_exists(&artifact_path)?;
+    #[cfg(target_os = "macos")]
+    {
+        let bundle_dir = package_dir.join(format!("{PRODUCT_NAME}.clap"));
+        let contents_dir = bundle_dir.join("Contents");
+        let macos_dir = contents_dir.join("MacOS");
+        let plist_path = contents_dir.join("Info.plist");
+        fs::create_dir_all(&macos_dir).map_err(io_error)?;
+
+        let entrypoint = macos_dir.join(PRODUCT_SLUG);
+        if entrypoint.exists() {
+            remove_path_if_exists(&entrypoint)?;
+        }
+        fs::copy(clap_binary, &entrypoint).map_err(io_error)?;
+        fs::write(plist_path, clap_info_plist()).map_err(io_error)?;
+        Ok(bundle_dir)
     }
-    fs::copy(clap_binary, &artifact_path).map_err(io_error)?;
-    Ok(artifact_path)
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::create_dir_all(package_dir).map_err(io_error)?;
+        let artifact_path = package_dir.join(format!("{PRODUCT_SLUG}.clap"));
+        if artifact_path.exists() {
+            remove_path_if_exists(&artifact_path)?;
+        }
+        fs::copy(clap_binary, &artifact_path).map_err(io_error)?;
+        Ok(artifact_path)
+    }
 }
 
 fn stage_clap_bundle(clap_binary: &Path, wrapper_stage_dir: &Path) -> Result<PathBuf, String> {
@@ -290,6 +340,7 @@ fn configure_wrapper_project(
     workspace_root: &Path,
     wrapper_build_dir: &Path,
     clap_bundle: &Path,
+    formats: &[PackageFormat],
     profile: BuildProfile,
 ) -> Result<(), String> {
     fs::create_dir_all(wrapper_build_dir).map_err(io_error)?;
@@ -307,7 +358,32 @@ fn configure_wrapper_project(
         .arg(format!("-DCLAP_PLUGIN_BUNDLE={}", clap_bundle.display()))
         .arg(format!("-DCLAP_WRAPPER_OUTPUT_NAME={PRODUCT_NAME}"))
         .arg(format!("-DCLAP_WRAPPER_BUNDLE_IDENTIFIER={BUNDLE_IDENTIFIER}"))
+        .arg(format!(
+            "-DCLAP_WRAPPER_BUNDLE_VERSION={}",
+            env!("CARGO_PKG_VERSION")
+        ))
         .arg("-DCLAP_WRAPPER_DOWNLOAD_DEPENDENCIES=TRUE");
+
+    if cfg!(target_os = "macos") && formats.contains(&PackageFormat::Au) {
+        command
+            .arg("-DCLAP_WRAPPER_BUILD_AUV2=ON")
+            .arg(format!(
+                "-DCLAP_WRAPPER_AUV2_MANUFACTURER_NAME={}",
+                env_or_default("CLAP_WRAPPER_AUV2_MANUFACTURER_NAME", "Mimium")
+            ))
+            .arg(format!(
+                "-DCLAP_WRAPPER_AUV2_MANUFACTURER_CODE={}",
+                env_or_default("CLAP_WRAPPER_AUV2_MANUFACTURER_CODE", "Mimi")
+            ))
+            .arg(format!(
+                "-DCLAP_WRAPPER_AUV2_SUBTYPE_CODE={}",
+                env_or_default("CLAP_WRAPPER_AUV2_SUBTYPE_CODE", "Mclp")
+            ))
+            .arg(format!(
+                "-DCLAP_WRAPPER_AUV2_INSTRUMENT_TYPE={}",
+                env_or_default("CLAP_WRAPPER_AUV2_INSTRUMENT_TYPE", "aumu")
+            ));
+    }
 
     if let Some(clap_sdk_root) = env::var_os("CLAP_SDK_ROOT") {
         command.arg(format!(
@@ -358,6 +434,7 @@ fn build_wrapper_targets(
 fn collect_artifacts(
     clap_artifact: Option<&Path>,
     wrapper_build_dir: &Path,
+    package_dir: &Path,
     formats: &[PackageFormat],
 ) -> Result<Vec<BuiltArtifact>, String> {
     let mut artifacts = Vec::new();
@@ -374,8 +451,14 @@ fn collect_artifacts(
                 });
             }
             PackageFormat::Vst3 => {
-                let path = find_first_matching_artifact(wrapper_build_dir, "vst3")?
-                    .ok_or_else(|| "failed to locate built VST3 bundle".to_string())?;
+                let path = stage_wrapper_artifact(*format, wrapper_build_dir, package_dir)?;
+                artifacts.push(BuiltArtifact {
+                    format: *format,
+                    path,
+                });
+            }
+            PackageFormat::Au => {
+                let path = stage_wrapper_artifact(*format, wrapper_build_dir, package_dir)?;
                 artifacts.push(BuiltArtifact {
                     format: *format,
                     path,
@@ -452,10 +535,7 @@ fn find_first_matching_artifact(dir: &Path, extension: &str) -> Result<Option<Pa
 
 fn install_artifacts(artifacts: &[BuiltArtifact]) -> Result<(), String> {
     for artifact in artifacts {
-        match artifact.format {
-            PackageFormat::Clap => install_artifact_into(&artifact.path, "CLAP")?,
-            PackageFormat::Vst3 => install_artifact_into(&artifact.path, "VST3")?,
-        }
+        install_artifact_into(&artifact.path, artifact.format.install_dir())?;
     }
     Ok(())
 }
@@ -595,9 +675,41 @@ fn push_format(formats: &mut Vec<PackageFormat>, format: PackageFormat) {
     }
 }
 
+fn stage_wrapper_artifact(
+    format: PackageFormat,
+    wrapper_build_dir: &Path,
+    package_dir: &Path,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(package_dir).map_err(io_error)?;
+    let built_path = find_first_matching_artifact(wrapper_build_dir, format.bundle_extension())?
+        .ok_or_else(|| format!("failed to locate built {} bundle", format.bundle_extension()))?;
+
+    let destination = package_dir.join(
+        built_path
+            .file_name()
+            .ok_or_else(|| "invalid wrapper artifact path".to_string())?,
+    );
+
+    if destination.exists() {
+        remove_path_if_exists(&destination)?;
+    }
+
+    if built_path.is_dir() {
+        copy_dir_recursive(&built_path, &destination)?;
+    } else {
+        fs::copy(&built_path, &destination).map_err(io_error)?;
+    }
+
+    Ok(destination)
+}
+
+fn env_or_default(key: &str, default: &str) -> String {
+    env::var(key).ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| default.to_string())
+}
+
 fn print_usage() {
     println!(
-        "Usage:\n  cargo xtask package [--release|--debug] [--format clap|vst3] [--all-formats] [--install]\n\nCommands:\n  package     Build and stage plugin artifacts (.clap and/or .vst3)"
+        "Usage:\n  cargo xtask package [--release|--debug] [--format clap|vst3|au] [--all-formats] [--install]\n\nCommands:\n  package     Build and stage plugin artifacts (.clap, .vst3, and on macOS .component)"
     );
 }
 
