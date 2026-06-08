@@ -1,0 +1,16 @@
+let twopi = 6.283185307179586
+
+fn phasor(freq: float) {
+  (self + freq / samplerate) % 1.0
+}
+
+fn dsp() {
+  let pulse_freq = Control!("PulseFreq", 2.0)
+  let tone_freq = Control!("ToneFreq", 110.0)
+  let gain = Control!("Gain", 0.2)
+
+  let pulse = if phasor(pulse_freq) < 0.08 { 1.0 } else { 0.0 }
+  let tone = sin(phasor(tone_freq) * twopi) * 0.5
+  let signal = (pulse + tone) * gain
+  (signal, signal)
+}

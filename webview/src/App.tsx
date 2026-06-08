@@ -5,9 +5,13 @@ import logoSvg from "../assets/mimium_logo_slant.svg?raw";
 import { LANGUAGE_ID, registerMimiumLanguage } from "./editor/language";
 import { registerThemes } from "./editor/themes";
 import {
+  loadExample,
   onPluginMessage,
   requestClipboardRead,
+  requestExamples,
+  requestGlobalSettings,
   requestState,
+  saveGlobalSettings,
   setKnob,
   setSource,
   writeClipboardText,
@@ -51,8 +55,20 @@ const LOGO_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(logoSvg)
 function App() {
   const [source, setSourceText] = useState(DEFAULT_SOURCE);
   const [isDrawerOpen, setIsDrawerOpen] = useState(true);
+  const [isExamplesOpen, setIsExamplesOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [knobs, setKnobs] = useState(DEFAULT_KNOBS);
   const [compileError, setCompileError] = useState<string | null>(null);
+  const [libraryPath, setLibraryPath] = useState("");
+  const [saveResult, setSaveResult] = useState<string | null>(null);
+  const [examples, setExamples] = useState<
+    Array<{ filename: string }>
+  >([]);
+  const [aboutInfo, setAboutInfo] = useState<{
+    plugin_version: string;
+    mimium_compiler_version: string;
+    repository_url: string;
+  } | null>(null);
 
   const editorContainerId = useMemo(() => "editor-container", []);
   const hasInitialStateRef = useRef(false);
@@ -190,6 +206,8 @@ function App() {
     });
 
     requestState();
+    requestGlobalSettings();
+    requestExamples();
 
     const unsubscribe = onPluginMessage((message) => {
       if (message.type === "clipboard_read_result") {
@@ -223,6 +241,26 @@ function App() {
             return { ...knob, value: local.value };
           });
         });
+        return;
+      }
+
+      if (message.type === "global_settings") {
+        setLibraryPath(message.settings.library_path);
+        return;
+      }
+
+      if (message.type === "save_settings_result") {
+        setSaveResult(message.message);
+        return;
+      }
+
+      if (message.type === "example_list") {
+        setExamples(message.examples);
+        return;
+      }
+
+      if (message.type === "about_info") {
+        setAboutInfo(message.about);
         return;
       }
 
@@ -294,15 +332,104 @@ function App() {
     setKnob(index, { value });
   };
 
+  const handleSaveSettings = () => {
+    saveGlobalSettings(libraryPath);
+  };
+
+  const handleLoadExample = (filename: string) => {
+    loadExample(filename);
+    setIsExamplesOpen(false);
+  };
+
   return (
     <div className="page">
       <div className="background-grid" />
       <header className="logo-bar" aria-label="mimium logo">
+        <button
+          className="chrome-icon-button left"
+          onClick={() => setIsExamplesOpen((open) => !open)}
+          title="Examples"
+          aria-label="Examples"
+        >
+          ☰
+        </button>
         <img className="logo-image" src={LOGO_URL} alt="mimium" />
+        <button
+          className="chrome-icon-button right"
+          onClick={() => setIsSettingsOpen(true)}
+          title="Settings"
+          aria-label="Settings"
+        >
+          ⚙
+        </button>
       </header>
+      {isExamplesOpen && (
+        <aside className="examples-panel" role="complementary" aria-label="Examples">
+          <div className="panel-title">Examples</div>
+          <div className="examples-list">
+            {examples.map((example) => (
+              <button
+                key={example.filename}
+                className="example-item"
+                onClick={() => handleLoadExample(example.filename)}
+              >
+                <div className="example-name">{example.filename}</div>
+              </button>
+            ))}
+          </div>
+        </aside>
+      )}
       <main className={`editor-shell ${isDrawerOpen ? "editor-shell-with-drawer" : ""}`}>
         <div id={editorContainerId} className="editor-container" />
       </main>
+      {isSettingsOpen && (
+        <div
+          className="settings-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Settings"
+          onClick={() => setIsSettingsOpen(false)}
+        >
+          <section className="settings-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-header">
+              <div className="settings-title">Plugin Settings</div>
+              <button
+                className="settings-close-button"
+                onClick={() => setIsSettingsOpen(false)}
+                aria-label="Close settings"
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+            <label className="settings-label" htmlFor="library-path-input">
+              mimium library path
+            </label>
+            <input
+              id="library-path-input"
+              className="settings-input"
+              value={libraryPath}
+              onChange={(event) => setLibraryPath(event.target.value)}
+            />
+            <div className="settings-buttons">
+              <button className="settings-button" onClick={handleSaveSettings}>
+                Save
+              </button>
+            </div>
+            {saveResult && <div className="settings-note">{saveResult}</div>}
+            <div className="about-block">
+              <div className="panel-title">About</div>
+              <div className="about-row">Plugin: {aboutInfo?.plugin_version ?? "-"}</div>
+              <div className="about-row">
+                mimium compiler: {aboutInfo?.mimium_compiler_version ?? "-"}
+              </div>
+              <a className="about-link" href={aboutInfo?.repository_url} target="_blank" rel="noreferrer">
+                {aboutInfo?.repository_url ?? "https://github.com/mimium-org/mimium-audio-plugin"}
+              </a>
+            </div>
+          </section>
+        </div>
+      )}
       {compileError && (
         <aside className="error-float" role="alert" aria-live="assertive">
           <div className="error-float-title">Compile Error</div>

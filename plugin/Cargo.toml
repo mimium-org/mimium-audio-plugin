@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 arboard = "3"
 clack-plugin = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18" }
 clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18", features = ["audio-ports", "clack-plugin", "gui", "params", "state"] }
+include_dir = "0.7"
 mimium-lang = { path = "../../mimium-rs/crates/lib/mimium-lang" }
 mimium-plugin-macros = { path = "../../mimium-rs/crates/lib/plugins/mimium-plugin-macros" }
 raw-window-handle = "0.6"

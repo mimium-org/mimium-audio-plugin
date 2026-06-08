@@ -28,6 +28,20 @@ export type PluginCommand =
       index: number;
       name?: string;
       value?: number;
+    }
+  | {
+      type: "request_global_settings";
+    }
+  | {
+      type: "save_global_settings";
+      library_path: string;
+    }
+  | {
+      type: "request_examples";
+    }
+  | {
+      type: "load_example";
+      filename: string;
     };
 
 export type PluginMessage =
@@ -51,6 +65,31 @@ export type PluginMessage =
         name: string;
         value: number;
       }>;
+    }
+  | {
+      type: "global_settings";
+      settings: {
+        library_path: string;
+      };
+    }
+  | {
+      type: "save_settings_result";
+      ok: boolean;
+      message: string;
+    }
+  | {
+      type: "example_list";
+      examples: Array<{
+        filename: string;
+      }>;
+    }
+  | {
+      type: "about_info";
+      about: {
+        plugin_version: string;
+        mimium_compiler_version: string;
+        repository_url: string;
+      };
     };
 
 type PluginMessageCallback = (message: PluginMessage) => void;
@@ -96,6 +135,22 @@ export function setKnob(index: number, payload: { name?: string; value?: number 
     index,
     ...payload,
   });
+}
+
+export function requestGlobalSettings(): void {
+  sendToPlugin({ type: "request_global_settings" });
+}
+
+export function saveGlobalSettings(libraryPath: string): void {
+  sendToPlugin({ type: "save_global_settings", library_path: libraryPath });
+}
+
+export function requestExamples(): void {
+  sendToPlugin({ type: "request_examples" });
+}
+
+export function loadExample(filename: string): void {
+  sendToPlugin({ type: "load_example", filename });
 }
 
 export function onPluginMessage(callback: PluginMessageCallback): () => void {

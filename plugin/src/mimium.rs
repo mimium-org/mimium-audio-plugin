@@ -7,6 +7,32 @@ use mimium_lang::utils::error::ReportableError;
 use mimium_lang::{Config, ExecContext};
 use std::sync::Arc;
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: Option<&str>) -> Self {
+        let previous = std::env::var_os(key);
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(next) => std::env::set_var(key, next),
+            None => std::env::remove_var(key),
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.clone() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 pub(crate) const DEFAULT_SOURCE: &str = r#"let twopi = 6.283185307179586
 
 fn phasor(freq: float) {
@@ -50,7 +76,12 @@ pub(crate) struct PreparedProgram {
     pub(crate) resolved_knob_names: [String; KNOB_COUNT],
 }
 
-pub(crate) fn compile_program(source: &str, knobs: Arc<KnobBank>) -> Result<PreparedProgram, String> {
+pub(crate) fn compile_program(
+    source: &str,
+    knobs: Arc<KnobBank>,
+    library_path: Option<&str>,
+) -> Result<PreparedProgram, String> {
+    let _lib_path_guard = EnvVarGuard::set("MIMIUM_LIB_PATH", library_path);
     let initial_names = knobs.snapshot_names();
     let mut ctx = ExecContext::new([].into_iter(), None, Config::default());
     ctx.add_system_plugin(ControlSystemPlugin::new(Arc::clone(&knobs), initial_names));

@@ -2,6 +2,7 @@ use crate::gui::MimiumPluginGui;
 use crate::mimium::{compile_program, CompileFeedback};
 use crate::params::KnobBank;
 use crate::processor::MimiumPluginAudioProcessor;
+use crate::settings::load_global_settings;
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
@@ -17,10 +18,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod control;
+mod examples;
 mod gui;
 mod mimium;
 mod params;
 mod processor;
+mod settings;
 mod webview_gui;
 
 pub struct MimiumPlugin;
@@ -52,8 +55,13 @@ impl DefaultPluginFactory for MimiumPlugin {
 
     fn new_shared(host: HostSharedHandle<'_>) -> Result<Self::Shared<'_>, PluginError> {
         let knobs = Arc::new(KnobBank::new());
+        let global_settings = load_global_settings();
         let source = mimium::DEFAULT_SOURCE.to_string();
-        let (pending_program, compile_feedback) = match compile_program(&source, Arc::clone(&knobs)) {
+        let (pending_program, compile_feedback) = match compile_program(
+            &source,
+            Arc::clone(&knobs),
+            Some(global_settings.library_path.as_str()),
+        ) {
             Ok(program) => (
                 Some(program),
                 CompileFeedback::success("Compiled initial mimium program."),
@@ -76,6 +84,7 @@ impl DefaultPluginFactory for MimiumPlugin {
             pending_program: Arc::new(Mutex::new(pending_program)),
             pending_ui_messages: Arc::new(Mutex::new(Vec::new())),
             state_dirty: Arc::new(AtomicBool::new(false)),
+            global_settings: Arc::new(Mutex::new(global_settings)),
             host: unsafe { host.with_arbitrary_lifetime() },
         })
     }
@@ -101,6 +110,7 @@ pub struct MimiumPluginShared {
     pub(crate) pending_program: Arc<Mutex<Option<mimium::PreparedProgram>>>,
     pub(crate) pending_ui_messages: Arc<Mutex<Vec<String>>>,
     pub(crate) state_dirty: Arc<AtomicBool>,
+    pub(crate) global_settings: Arc<Mutex<settings::GlobalSettings>>,
     pub(crate) host: HostSharedHandle<'static>,
 }
 
@@ -204,7 +214,18 @@ impl PluginStateImpl for MimiumPluginMainThread<'_> {
             *current = source.clone();
         }
 
-        let feedback = match compile_program(&source, Arc::clone(&self.shared.knobs)) {
+        let library_path = self
+            .shared
+            .global_settings
+            .lock()
+            .map(|settings| settings.library_path.clone())
+            .unwrap_or_default();
+
+        let feedback = match compile_program(
+            &source,
+            Arc::clone(&self.shared.knobs),
+            Some(library_path.as_str()),
+        ) {
             Ok(program) => {
                 self.shared.knobs.set_names(program.resolved_knob_names.clone());
                 if let Ok(mut pending) = self.shared.pending_program.lock() {
