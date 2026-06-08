@@ -1,4 +1,5 @@
 use crate::mimium::{self, CompileFeedback};
+use crate::params::{KnobBank, KNOB_COUNT};
 use crate::webview_gui::{EmbeddedWebviewConfig, EmbeddedWebviewGui};
 use crate::{MimiumPluginMainThread, MimiumPluginShared};
 use arboard::Clipboard;
@@ -29,6 +30,16 @@ enum PluginMessage {
         text: Option<String>,
         message: String,
     },
+    KnobState {
+        knobs: Vec<KnobUiState>,
+    },
+}
+
+#[derive(Serialize)]
+struct KnobUiState {
+    index: usize,
+    name: String,
+    value: f64,
 }
 
 pub struct MimiumPluginGui {
@@ -42,6 +53,7 @@ impl MimiumPluginGui {
         let pending_program = Arc::clone(&shared.pending_program);
         let pending_ui_messages = Arc::clone(&shared.pending_ui_messages);
         let state_dirty = Arc::clone(&shared.state_dirty);
+        let knobs = Arc::clone(&shared.knobs);
         let host = unsafe { shared.host.with_arbitrary_lifetime() };
 
         let webview = EmbeddedWebviewGui::new(parent, &GUI_CONFIG, move |msg| {
@@ -59,8 +71,9 @@ impl MimiumPluginGui {
 
                     state_dirty.store(true, Ordering::SeqCst);
 
-                    let feedback = match mimium::compile_program(&source) {
+                    let feedback = match mimium::compile_program(&source, Arc::clone(&knobs)) {
                         Ok(program) => {
+                            knobs.set_names(program.resolved_knob_names.clone());
                             if let Ok(mut pending) = pending_program.lock() {
                                 *pending = Some(program);
                             }
@@ -76,6 +89,7 @@ impl MimiumPluginGui {
                     }
 
                     queue_editor_state(&pending_ui_messages, &source, &feedback);
+                    queue_knob_state(&pending_ui_messages, &knobs);
                     host.request_callback();
                 }
                 Some("request_state") => {
@@ -87,6 +101,30 @@ impl MimiumPluginGui {
                             CompileFeedback::error("Failed to read plugin state.".to_string())
                         });
                     queue_editor_state(&pending_ui_messages, &source, &feedback);
+                    queue_knob_state(&pending_ui_messages, &knobs);
+                    host.request_callback();
+                }
+                Some("set_knob") => {
+                    let index = msg
+                        .get("index")
+                        .and_then(|value| value.as_u64())
+                        .map(|value| value as usize)
+                        .unwrap_or(usize::MAX);
+
+                    if index >= KNOB_COUNT {
+                        return;
+                    }
+
+                    if let Some(name) = msg.get("name").and_then(|value| value.as_str()) {
+                        knobs.set_name(index, name.to_string());
+                    }
+
+                    if let Some(value) = msg.get("value").and_then(|value| value.as_f64()) {
+                        knobs.set_value(index, value);
+                    }
+
+                    state_dirty.store(true, Ordering::SeqCst);
+                    queue_knob_state(&pending_ui_messages, &knobs);
                     host.request_callback();
                 }
                 Some("clipboard_write") => {
@@ -148,6 +186,14 @@ impl MimiumPluginGui {
             self.send_raw_message(&json);
         }
     }
+
+    pub fn send_knob_state(&self, shared: &MimiumPluginShared) {
+        if let Ok(json) = serde_json::to_string(&PluginMessage::KnobState {
+            knobs: snapshot_knobs(&shared.knobs),
+        }) {
+            self.send_raw_message(&json);
+        }
+    }
 }
 
 pub(crate) fn queue_clipboard_read_result(
@@ -183,6 +229,27 @@ pub(crate) fn queue_editor_state(
             queue.push(json);
         }
     }
+}
+
+pub(crate) fn queue_knob_state(queue: &std::sync::Mutex<Vec<String>>, knobs: &KnobBank) {
+    if let Ok(json) = serde_json::to_string(&PluginMessage::KnobState {
+        knobs: snapshot_knobs(knobs),
+    }) {
+        if let Ok(mut queue) = queue.lock() {
+            queue.push(json);
+        }
+    }
+}
+
+fn snapshot_knobs(knobs: &KnobBank) -> Vec<KnobUiState> {
+    let names = knobs.snapshot_names();
+    (0..KNOB_COUNT)
+        .map(|index| KnobUiState {
+            index,
+            name: names[index].clone(),
+            value: knobs.value(index),
+        })
+        .collect()
 }
 
 impl<'a> PluginGuiImpl for MimiumPluginMainThread<'a> {
@@ -245,6 +312,7 @@ impl<'a> PluginGuiImpl for MimiumPluginMainThread<'a> {
                 .map(|value| value.clone())
                 .unwrap_or_else(|_| CompileFeedback::error("Failed to read plugin state."));
             gui.send_editor_state(&source, &feedback);
+            gui.send_knob_state(self.shared);
         }
 
         Ok(())

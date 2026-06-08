@@ -1,11 +1,15 @@
 use crate::mimium;
+use crate::params::param_index_from_id;
 use crate::{MimiumPluginMainThread, MimiumPluginShared};
+use clack_extensions::params::PluginAudioProcessorParams;
+use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::prelude::*;
 use mimium_lang::runtime::wasm::engine::WasmDspRuntime;
 use mimium_lang::runtime::{DspRuntime, Time};
 
 pub struct MimiumPluginAudioProcessor<'a> {
     shared: &'a MimiumPluginShared,
+    host: HostAudioProcessorHandle<'a>,
     runtime: Option<WasmDspRuntime>,
     sample_time: u64,
     sample_rate: f64,
@@ -15,13 +19,14 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
     for MimiumPluginAudioProcessor<'a>
 {
     fn activate(
-        _host: HostAudioProcessorHandle<'a>,
+        host: HostAudioProcessorHandle<'a>,
         _main_thread: &mut MimiumPluginMainThread<'a>,
         shared: &'a MimiumPluginShared,
         audio_config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
         let mut processor = Self {
             shared,
+            host,
             runtime: None,
             sample_time: 0,
             sample_rate: audio_config.sample_rate,
@@ -34,8 +39,26 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
         &mut self,
         _process: Process,
         mut audio: Audio,
-        _events: Events,
+        events: Events,
     ) -> Result<ProcessStatus, PluginError> {
+        let mut had_param_updates = false;
+        for event_batch in events.input.batch() {
+            for event in event_batch.events() {
+                if let Some(CoreEventSpace::ParamValue(value)) = event.as_core_event() {
+                    if let Some(param_id) = value.param_id() {
+                        if let Some(index) = param_index_from_id(param_id) {
+                            self.shared.knobs.set_value(index, value.value());
+                            had_param_updates = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if had_param_updates {
+            self.host.request_callback();
+        }
+
         self.try_swap_runtime();
 
         let mut output_port = audio
@@ -73,6 +96,31 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
         }
 
         Ok(ProcessStatus::ContinueIfNotQuiet)
+    }
+}
+
+impl PluginAudioProcessorParams for MimiumPluginAudioProcessor<'_> {
+    fn flush(
+        &mut self,
+        input_parameter_changes: &InputEvents,
+        _output_parameter_changes: &mut OutputEvents,
+    ) {
+        let mut had_param_updates = false;
+
+        for event in input_parameter_changes {
+            if let Some(CoreEventSpace::ParamValue(value)) = event.as_core_event() {
+                if let Some(param_id) = value.param_id() {
+                    if let Some(index) = param_index_from_id(param_id) {
+                        self.shared.knobs.set_value(index, value.value());
+                        had_param_updates = true;
+                    }
+                }
+            }
+        }
+
+        if had_param_updates {
+            self.host.request_callback();
+        }
     }
 }
 

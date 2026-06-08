@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
+import { DawKnob } from "./components/DawKnob";
+import logoSvg from "../assets/mimium_logo_slant.svg?raw";
 import { LANGUAGE_ID, registerMimiumLanguage } from "./editor/language";
 import { registerThemes } from "./editor/themes";
 import {
   onPluginMessage,
   requestClipboardRead,
   requestState,
+  setKnob,
   setSource,
   writeClipboardText,
 } from "./ipc";
@@ -29,17 +32,32 @@ fn phasor(freq: float) {
 }
 
 fn dsp() {
-  let left = sin(phasor(220.0) * twopi) * 0.18
-  let right = sin(phasor(330.0) * twopi) * 0.18
+  let left_freq = Control!("Left Freq", 220.0)
+  let right_freq = Control!("Right Freq", 330.0)
+  let gain = Control!("Gain", 0.18)
+  let left = sin(phasor(left_freq) * twopi) * gain
+  let right = sin(phasor(right_freq) * twopi) * gain
   (left, right)
 }`;
 
+const DEFAULT_KNOBS = Array.from({ length: 8 }, (_, index) => ({
+  index,
+  name: `Knob ${index + 1}`,
+  value: 0.5,
+}));
+
+const LOGO_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(logoSvg)}`;
+
 function App() {
-  const [status, setStatus] = useState("Waiting for plugin state...");
   const [source, setSourceText] = useState(DEFAULT_SOURCE);
-  const [isCompiling, setIsCompiling] = useState(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(true);
+  const [knobs, setKnobs] = useState(DEFAULT_KNOBS);
+  const [compileError, setCompileError] = useState<string | null>(null);
 
   const editorContainerId = useMemo(() => "editor-container", []);
+  const hasInitialStateRef = useRef(false);
+  const skipNextSyncCompileRef = useRef(false);
+  const draggingKnobIndexRef = useRef<number | null>(null);
 
   useEffect(() => {
     const editor = monaco.editor.create(document.getElementById(editorContainerId)!, {
@@ -184,14 +202,43 @@ function App() {
         return;
       }
 
+      if (message.type === "knob_state") {
+        setKnobs((current) => {
+          const draggingIndex = draggingKnobIndexRef.current;
+          if (draggingIndex == null) {
+            return message.knobs;
+          }
+
+          const currentByIndex = new Map(current.map((knob) => [knob.index, knob]));
+          return message.knobs.map((knob) => {
+            if (knob.index !== draggingIndex) {
+              return knob;
+            }
+
+            const local = currentByIndex.get(knob.index);
+            if (!local) {
+              return knob;
+            }
+
+            return { ...knob, value: local.value };
+          });
+        });
+        return;
+      }
+
       if (message.type !== "editor_state") {
         return;
       }
 
-      setStatus(message.message);
-      setIsCompiling(false);
+      hasInitialStateRef.current = true;
+      if (message.ok) {
+        setCompileError(null);
+      } else {
+        setCompileError(message.message);
+      }
 
       if (message.source !== editor.getValue()) {
+        skipNextSyncCompileRef.current = true;
         const selection = editor.getSelection();
         editor.setValue(message.source);
         if (selection) {
@@ -211,34 +258,102 @@ function App() {
     };
   }, [editorContainerId]);
 
-  const handleCompile = () => {
-    setIsCompiling(true);
-    setStatus("Compiling...");
-    setSource(source);
+  useEffect(() => {
+    if (!hasInitialStateRef.current) {
+      return;
+    }
+
+    if (skipNextSyncCompileRef.current) {
+      skipNextSyncCompileRef.current = false;
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSource(source);
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [source]);
+
+  const handleKnobNameChange = (index: number, name: string) => {
+    setKnobs((current) =>
+      current.map((knob) => (knob.index === index ? { ...knob, name } : knob))
+    );
+  };
+
+  const commitKnobName = (index: number, name: string) => {
+    setKnob(index, { name });
+  };
+
+  const handleKnobValueChange = (index: number, value: number) => {
+    setKnobs((current) =>
+      current.map((knob) => (knob.index === index ? { ...knob, value } : knob))
+    );
+    setKnob(index, { value });
   };
 
   return (
     <div className="page">
       <div className="background-grid" />
-      <header className="hero">
-        <div>
-          <p className="eyebrow">Mimium x CLAP x Clack</p>
-          <h1>Live Coded Stereo Synth</h1>
-          <p className="subtitle">
-            Monaco editor inside a CLAP webview. Source updates are compiled with mimium-rs
-            Wasm JIT and swapped in the audio thread.
-          </p>
-        </div>
-        <div className="actions">
-          <button className="compile-button" onClick={handleCompile} disabled={isCompiling}>
-            {isCompiling ? "Compiling..." : "Compile And Swap"}
-          </button>
-          <div className="status">{status}</div>
-        </div>
+      <header className="logo-bar" aria-label="mimium logo">
+        <img className="logo-image" src={LOGO_URL} alt="mimium" />
       </header>
-      <main className="editor-shell">
+      <main className={`editor-shell ${isDrawerOpen ? "editor-shell-with-drawer" : ""}`}>
         <div id={editorContainerId} className="editor-container" />
       </main>
+      {compileError && (
+        <aside className="error-float" role="alert" aria-live="assertive">
+          <div className="error-float-title">Compile Error</div>
+          <pre className="error-float-message">{compileError}</pre>
+        </aside>
+      )}
+      <section
+        className={`knob-drawer ${isDrawerOpen ? "knob-drawer-open" : "knob-drawer-closed"}`}
+        aria-label="automation knobs"
+      >
+        <button
+          className="drawer-toggle"
+          onClick={() => setIsDrawerOpen((open) => !open)}
+          aria-expanded={isDrawerOpen}
+          title={isDrawerOpen ? "Hide knobs" : "Show knobs"}
+          aria-label={isDrawerOpen ? "Hide knobs" : "Show knobs"}
+        >
+          <span aria-hidden="true">{isDrawerOpen ? "▼" : "▲"}</span>
+        </button>
+        <div className="knob-row">
+          {knobs.map((knob) => (
+            <div key={knob.index} className="knob-mini">
+              <div className="knob-mini-meta">
+                <span>#{knob.index + 1}</span>
+                <span>{knob.value.toFixed(2)}</span>
+              </div>
+              <div className="knob-canvas-wrap">
+                <DawKnob
+                  size={56}
+                  value={knob.value}
+                  onChange={(next) => handleKnobValueChange(knob.index, next)}
+                  onDragStart={() => {
+                    draggingKnobIndexRef.current = knob.index;
+                  }}
+                  onDragEnd={() => {
+                    if (draggingKnobIndexRef.current === knob.index) {
+                      draggingKnobIndexRef.current = null;
+                    }
+                  }}
+                />
+              </div>
+              <input
+                className="knob-name"
+                value={knob.name}
+                onChange={(event) => handleKnobNameChange(knob.index, event.target.value)}
+                onBlur={(event) => commitKnobName(knob.index, event.target.value)}
+              />
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

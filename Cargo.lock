@@ -1943,6 +1943,7 @@ dependencies = [
  "clack-extensions",
  "clack-plugin",
  "mimium-lang",
+ "mimium-plugin-macros",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -1974,6 +1975,15 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-encoder 0.221.3",
  "wasmtime",
+]
+
+[[package]]
+name = "mimium-plugin-macros"
+version = "4.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

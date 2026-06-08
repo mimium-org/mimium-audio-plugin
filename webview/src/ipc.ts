@@ -22,6 +22,12 @@ export type PluginCommand =
   | {
       type: "clipboard_read";
       request_id: string;
+    }
+  | {
+      type: "set_knob";
+      index: number;
+      name?: string;
+      value?: number;
     };
 
 export type PluginMessage =
@@ -37,6 +43,14 @@ export type PluginMessage =
       ok: boolean;
       text: string | null;
       message: string;
+    }
+  | {
+      type: "knob_state";
+      knobs: Array<{
+        index: number;
+        name: string;
+        value: number;
+      }>;
     };
 
 type PluginMessageCallback = (message: PluginMessage) => void;
@@ -74,6 +88,14 @@ export function writeClipboardText(text: string): void {
 
 export function requestClipboardRead(requestId: string): void {
   sendToPlugin({ type: "clipboard_read", request_id: requestId });
+}
+
+export function setKnob(index: number, payload: { name?: string; value?: number }): void {
+  sendToPlugin({
+    type: "set_knob",
+    index,
+    ...payload,
+  });
 }
 
 export function onPluginMessage(callback: PluginMessageCallback): () => void {

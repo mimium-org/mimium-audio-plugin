@@ -158,6 +158,7 @@ fn package(options: Options) -> Result<(), String> {
     let wrapper_stage_dir = target_root.join("wrapper-stage").join(options.profile.dir_name());
     let wrapper_build_dir = target_root.join("wrapper-build").join(options.profile.dir_name());
 
+    build_webview(&workspace_root)?;
     cargo_build_plugin(&workspace_root, options.profile)?;
     let clap_binary = built_clap_binary_path(&workspace_root, options.profile)?;
 
@@ -194,6 +195,21 @@ fn package(options: Options) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn build_webview(workspace_root: &Path) -> Result<(), String> {
+    let webview_dir = workspace_root.join("webview");
+    if !webview_dir.join("package.json").exists() {
+        return Err(format!(
+            "missing webview/package.json at {}",
+            webview_dir.display()
+        ));
+    }
+
+    let mut command = Command::new("pnpm");
+    command.current_dir(&webview_dir);
+    command.arg("build");
+    run_command(command, "pnpm build (webview)")
 }
 
 fn cargo_build_plugin(workspace_root: &Path, profile: BuildProfile) -> Result<(), String> {
