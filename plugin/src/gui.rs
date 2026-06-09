@@ -92,6 +92,23 @@ impl MimiumPluginGui {
 
                     state_dirty.store(true, Ordering::SeqCst);
 
+                    let feedback = compile_feedback
+                        .lock()
+                        .map(|state| state.clone())
+                        .unwrap_or_else(|_| {
+                            CompileFeedback::error("Failed to read compile status.".to_string())
+                        });
+
+                    queue_editor_state(&pending_ui_messages, &source, &feedback);
+                    queue_knob_state(&pending_ui_messages, &knobs);
+                    queue_global_settings(&pending_ui_messages, &global_settings);
+                    queue_example_list(&pending_ui_messages);
+                    queue_about_info(&pending_ui_messages);
+                    host.request_callback();
+                }
+                Some("compile_source") => {
+                    let source = current_source.lock().map(|value| value.clone()).unwrap_or_default();
+
                     let library_path = global_settings
                         .lock()
                         .map(|settings| settings.library_path.clone())
@@ -108,7 +125,7 @@ impl MimiumPluginGui {
                                 *pending = Some(program);
                             }
                             CompileFeedback::success(
-                                "Compiled. The audio thread will swap the program on the next block.",
+                                "Compiled via worker process. The audio thread will swap the program on the next block.",
                             )
                         }
                         Err(error) => CompileFeedback::error(error),
@@ -120,9 +137,6 @@ impl MimiumPluginGui {
 
                     queue_editor_state(&pending_ui_messages, &source, &feedback);
                     queue_knob_state(&pending_ui_messages, &knobs);
-                    queue_global_settings(&pending_ui_messages, &global_settings);
-                    queue_example_list(&pending_ui_messages);
-                    queue_about_info(&pending_ui_messages);
                     host.request_callback();
                 }
                 Some("request_state") => {
@@ -226,27 +240,9 @@ impl MimiumPluginGui {
 
                     state_dirty.store(true, Ordering::SeqCst);
 
-                    let library_path = global_settings
-                        .lock()
-                        .map(|settings| settings.library_path.clone())
-                        .unwrap_or_default();
-
-                    let feedback = match mimium::compile_program(
-                        &source,
-                        Arc::clone(&knobs),
-                        Some(library_path.as_str()),
-                    ) {
-                        Ok(program) => {
-                            knobs.set_names(program.resolved_knob_names.clone());
-                            if let Ok(mut pending) = pending_program.lock() {
-                                *pending = Some(program);
-                            }
-                            CompileFeedback::success(
-                                "Loaded example. The audio thread will swap the program on the next block.",
-                            )
-                        }
-                        Err(error) => CompileFeedback::error(error),
-                    };
+                    let feedback = CompileFeedback::success(
+                        "Loaded example source. Press Compile to apply.",
+                    );
 
                     if let Ok(mut state) = compile_feedback.lock() {
                         *state = feedback.clone();
@@ -254,6 +250,7 @@ impl MimiumPluginGui {
 
                     queue_editor_state(&pending_ui_messages, &source, &feedback);
                     queue_knob_state(&pending_ui_messages, &knobs);
+                    queue_example_list(&pending_ui_messages);
                     host.request_callback();
                 }
                 Some("clipboard_write") => {

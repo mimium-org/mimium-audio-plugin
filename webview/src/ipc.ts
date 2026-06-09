@@ -13,6 +13,9 @@ export type PluginCommand =
       source: string;
     }
   | {
+      type: "compile_source";
+    }
+  | {
       type: "request_state";
     }
   | {
@@ -115,6 +118,10 @@ function sendToPlugin(message: PluginCommand): void {
 
 export function setSource(source: string): void {
   sendToPlugin({ type: "set_source", source });
+}
+
+export function compileSource(): void {
+  sendToPlugin({ type: "compile_source" });
 }
 
 export function requestState(): void {

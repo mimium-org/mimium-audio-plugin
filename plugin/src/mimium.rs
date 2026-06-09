@@ -1,37 +1,16 @@
-use crate::control::{ControlCompileResult, ControlSystemPlugin};
 use crate::params::{KnobBank, KNOB_COUNT};
-use mimium_lang::compiler::WasmOutput;
+use base64::Engine;
+use mimium_lang::compiler::{EvalStage, IoChannelInfo};
+use mimium_lang::interner::{Symbol, TypeNodeId};
+use mimium_lang::plugin::ExtFunTypeInfo;
 use mimium_lang::runtime::wasm::WasmPluginFnMap;
+use mimium_lang::runtime::wasm::WasmPluginFn;
 use mimium_lang::runtime::wasm::engine::{WasmDspRuntime, WasmEngine};
-use mimium_lang::utils::error::ReportableError;
-use mimium_lang::{Config, ExecContext};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: Option<&str>) -> Self {
-        let previous = std::env::var_os(key);
-        match value.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(next) => std::env::set_var(key, next),
-            None => std::env::remove_var(key),
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.clone() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
 
 pub(crate) const DEFAULT_SOURCE: &str = r#"let twopi = 6.283185307179586
 
@@ -71,7 +50,9 @@ impl CompileFeedback {
 }
 
 pub(crate) struct PreparedProgram {
-    wasm_output: WasmOutput,
+    wasm_bytes: Vec<u8>,
+    io_channels: Option<IoChannelInfo>,
+    ext_fns: Vec<ExtFunTypeInfo>,
     wasm_plugin_fns: Option<WasmPluginFnMap>,
     pub(crate) resolved_knob_names: [String; KNOB_COUNT],
 }
@@ -81,36 +62,84 @@ pub(crate) fn compile_program(
     knobs: Arc<KnobBank>,
     library_path: Option<&str>,
 ) -> Result<PreparedProgram, String> {
-    let _lib_path_guard = EnvVarGuard::set("MIMIUM_LIB_PATH", library_path);
-    let initial_names = knobs.snapshot_names();
-    let mut ctx = ExecContext::new([].into_iter(), None, Config::default());
-    ctx.add_system_plugin(ControlSystemPlugin::new(Arc::clone(&knobs), initial_names));
-    ctx.prepare_compiler();
+    compile_program_subprocess(source, knobs, library_path)
+}
 
-    let compiler = ctx
-        .get_compiler()
-        .ok_or_else(|| "mimium compiler initialization failed".to_string())?;
-    let wasm_output = compiler.emit_wasm(source).map_err(format_compile_errors)?;
-    let compile_result = read_control_compile_result(&mut ctx).unwrap_or_else(|| ControlCompileResult {
-        slot_names: knobs.snapshot_names(),
-        overflow_labels: Vec::new(),
-    });
+fn compile_program_subprocess(
+    source: &str,
+    knobs: Arc<KnobBank>,
+    library_path: Option<&str>,
+) -> Result<PreparedProgram, String> {
+    let request = WorkerCompileRequest {
+        source: source.to_string(),
+        library_path: library_path.map(|path| path.to_string()),
+        initial_knob_names: knobs.snapshot_names().to_vec(),
+    };
 
-    if !compile_result.overflow_labels.is_empty() {
-        return Err(format!(
-            "Control! labels exceeded {} knobs: {}",
-            KNOB_COUNT,
-            compile_result.overflow_labels.join(", ")
-        ));
+    let mut child = Command::new(worker_command())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn compiler worker: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = serde_json::to_vec(&request)
+            .map_err(|error| format!("failed to serialize worker request: {error}"))?;
+        stdin
+            .write_all(&payload)
+            .map_err(|error| format!("failed to write worker request: {error}"))?;
     }
 
-    let wasm_plugin_fns = ctx.freeze_wasm_plugin_fns();
-    validate_channels(&wasm_output)?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for compiler worker: {error}"))?;
+
+    let response: WorkerCompileResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("failed to decode worker response: {error}"))?;
+
+    if !output.status.success() || !response.ok {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let worker_error = if stderr.trim().is_empty() {
+            response.message
+        } else {
+            format!("{}\n{}", response.message, stderr.trim())
+        };
+        return Err(worker_error);
+    }
+
+    let wasm_base64 = response
+        .wasm_base64
+        .ok_or_else(|| "compiler worker did not return wasm output".to_string())?;
+    let io_channels = response.io_channels.map(|io| IoChannelInfo {
+        input: io.input,
+        output: io.output,
+    });
+    validate_channels(io_channels)?;
+
+    let mut resolved = response.resolved_knob_names;
+    if resolved.len() < KNOB_COUNT {
+        resolved.resize_with(KNOB_COUNT, || "".to_string());
+    }
+    let resolved_knob_names: [String; KNOB_COUNT] = resolved
+        .into_iter()
+        .take(KNOB_COUNT)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| "invalid worker knob name count".to_string())?;
 
     Ok(PreparedProgram {
-        wasm_output,
-        wasm_plugin_fns,
-        resolved_knob_names: compile_result.slot_names,
+        wasm_bytes: base64::engine::general_purpose::STANDARD
+            .decode(wasm_base64)
+            .map_err(|error| format!("failed to decode worker wasm: {error}"))?,
+        io_channels,
+        ext_fns: response
+            .ext_fns
+            .into_iter()
+            .map(|info| ExtFunTypeInfo::new(info.name, info.ty, info.stage))
+            .collect(),
+        wasm_plugin_fns: Some(make_wasm_plugin_fns(knobs)),
+        resolved_knob_names,
     })
 }
 
@@ -118,16 +147,16 @@ pub(crate) fn build_runtime(
     mut program: PreparedProgram,
     sample_rate: f64,
 ) -> Result<WasmDspRuntime, String> {
-    let mut engine = WasmEngine::new(&program.wasm_output.ext_fns, program.wasm_plugin_fns.take())
+    let mut engine = WasmEngine::new(&program.ext_fns, program.wasm_plugin_fns.take())
         .map_err(|error| format!("failed to create mimium Wasm engine: {error}"))?;
     engine
-        .load_module(&program.wasm_output.bytes)
+        .load_module(&program.wasm_bytes)
         .map_err(|error| format!("failed to load mimium Wasm module: {error}"))?;
 
     let mut runtime = WasmDspRuntime::new(
         engine,
-        program.wasm_output.io_channels,
-        program.wasm_output.dsp_state_skeleton.take(),
+        program.io_channels,
+        None,
     );
     runtime.set_sample_rate(sample_rate);
     runtime
@@ -137,24 +166,14 @@ pub(crate) fn build_runtime(
     Ok(runtime)
 }
 
-fn read_control_compile_result(ctx: &mut ExecContext) -> Option<ControlCompileResult> {
-    ctx.get_system_plugins_mut().find_map(|plugin| {
-        let mut plugin_ref = plugin.borrow_inner_mut();
-        plugin_ref
-            .as_any_mut()
-            .downcast_mut::<ControlSystemPlugin>()
-            .map(|control| control.compile_result())
-    })
-}
-
-fn validate_channels(output: &WasmOutput) -> Result<(), String> {
-    let Some(io) = output.io_channels else {
+fn validate_channels(io: Option<IoChannelInfo>) -> Result<(), String> {
+    let Some(io) = io else {
         return Err("mimium source must define dsp() with stereo output".to_string());
     };
 
-    if io.input != 0 || io.output != 2 {
+    if (io.input != 0 && io.input != 2) || io.output != 2 {
         return Err(format!(
-            "dsp() must expose 0 input / 2 output channels, but got {} input / {} output",
+            "dsp() must expose 0 or 2 input / 2 output channels, but got {} input / {} output",
             io.input, io.output
         ));
     }
@@ -162,10 +181,108 @@ fn validate_channels(output: &WasmOutput) -> Result<(), String> {
     Ok(())
 }
 
-fn format_compile_errors(errors: Vec<Box<dyn ReportableError>>) -> String {
-    errors
-        .into_iter()
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
+fn make_wasm_plugin_fns(knobs: Arc<KnobBank>) -> WasmPluginFnMap {
+    let mut map = HashMap::new();
+    map.insert(
+        "__get_slider".to_string(),
+        Arc::new(move |args: &[f64]| {
+            let index = args.first().copied().unwrap_or_default() as usize;
+            Some(knobs.value(index))
+        }) as WasmPluginFn,
+    );
+    map
 }
+
+fn worker_command() -> String {
+    if let Some(path) = std::env::var("MIMIUM_COMPILER_WORKER_BIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return path;
+    }
+
+    if let Some(path) = discover_worker_near_plugin() {
+        return path;
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let debug_path = cwd.join("target/debug/mimium-compiler-worker");
+        if debug_path.exists() {
+            return debug_path.to_string_lossy().to_string();
+        }
+
+        let release_path = cwd.join("target/release/mimium-compiler-worker");
+        if release_path.exists() {
+            return release_path.to_string_lossy().to_string();
+        }
+    }
+
+    "mimium-compiler-worker".to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn discover_worker_near_plugin() -> Option<String> {
+    use std::ffi::CStr;
+    use std::path::PathBuf;
+
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+    let marker = discover_worker_near_plugin as *const () as *const libc::c_void;
+    let ok = unsafe { libc::dladdr(marker, info.as_mut_ptr()) };
+    if ok == 0 {
+        return None;
+    }
+
+    let info = unsafe { info.assume_init() };
+    if info.dli_fname.is_null() {
+        return None;
+    }
+
+    let dylib_path = PathBuf::from(unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().to_string());
+    let dylib_dir = dylib_path.parent()?.to_path_buf();
+    let candidates = [
+        dylib_dir.join("mimium-compiler-worker"),
+        dylib_dir.join("../Resources/mimium-compiler-worker"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn discover_worker_near_plugin() -> Option<String> {
+    None
+}
+
+#[derive(Serialize)]
+struct WorkerCompileRequest {
+    source: String,
+    library_path: Option<String>,
+    initial_knob_names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct WorkerCompileResponse {
+    ok: bool,
+    message: String,
+    wasm_base64: Option<String>,
+    io_channels: Option<SerializableIoChannelInfo>,
+    ext_fns: Vec<SerializableExtFunTypeInfo>,
+    resolved_knob_names: Vec<String>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct SerializableIoChannelInfo {
+    input: u32,
+    output: u32,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct SerializableExtFunTypeInfo {
+    name: Symbol,
+    ty: TypeNodeId,
+    stage: EvalStage,
+}
+

@@ -17,7 +17,6 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-mod control;
 mod examples;
 mod gui;
 mod mimium;
@@ -252,11 +251,11 @@ impl PluginStateImpl for MimiumPluginMainThread<'_> {
 
 impl PluginAudioPortsImpl for MimiumPluginMainThread<'_> {
     fn count(&mut self, is_input: bool) -> u32 {
-        if is_input { 0 } else { 1 }
+        if is_input { 1 } else { 1 }
     }
 
-    fn get(&mut self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
-        if !is_input && index == 0 {
+    fn get(&mut self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
+        if index == 0 {
             writer.set(&AudioPortInfo {
                 id: ClapId::new(0),
                 name: b"main",

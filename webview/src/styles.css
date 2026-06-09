@@ -60,6 +60,11 @@ body,
   right: 12px;
 }
 
+.chrome-icon-button.compile {
+  right: 52px;
+  font-size: 15px;
+}
+
 .examples-panel {
   position: absolute;
   z-index: 6;
@@ -272,6 +277,19 @@ body,
   line-height: 1.35;
   padding: 10px;
   color: #ffd8dd;
+}
+
+.compile-float {
+  position: absolute;
+  z-index: 5;
+  right: 20px;
+  top: 64px;
+  border: 1px solid #8fb4c880;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #20343dcc;
+  color: #d9ebf5;
+  font-size: 12px;
 }
 
 .knob-drawer {

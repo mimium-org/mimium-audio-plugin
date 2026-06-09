@@ -1959,9 +1959,11 @@ name = "mimium-audio-plugin"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "clack-extensions",
  "clack-plugin",
  "include_dir",
+ "libc",
  "mimium-lang",
  "mimium-plugin-macros",
  "raw-window-handle",
@@ -1969,6 +1971,17 @@ dependencies = [
  "serde_json",
  "url",
  "wry",
+]
+
+[[package]]
+name = "mimium-compiler-worker"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "mimium-lang",
+ "mimium-plugin-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

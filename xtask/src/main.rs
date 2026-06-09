@@ -8,6 +8,7 @@ use std::process::Command;
 const PRODUCT_SLUG: &str = "mimium-audio-plugin";
 const PRODUCT_NAME: &str = "Mimium Audio Plugin";
 const CARGO_PACKAGE_NAME: &str = "mimium-audio-plugin";
+const COMPILER_WORKER_PACKAGE_NAME: &str = "mimium-compiler-worker";
 const BUNDLE_IDENTIFIER: &str = "org.mimium.mimium-audio-plugin";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -179,16 +180,21 @@ fn package(options: Options) -> Result<(), String> {
 
     build_webview(&workspace_root)?;
     cargo_build_plugin(&workspace_root, options.profile)?;
+    let compiler_worker_binary = build_compiler_worker(&workspace_root, options.profile)?;
     let clap_binary = built_clap_binary_path(&workspace_root, options.profile)?;
 
     let clap_artifact = if options.formats.contains(&PackageFormat::Clap) {
-        Some(stage_clap_artifact(&clap_binary, &package_dir)?)
+        Some(stage_clap_artifact(&clap_binary, &compiler_worker_binary, &package_dir)?)
     } else {
         None
     };
 
     let clap_bundle = if options.formats.iter().any(|format| format.requires_wrapper()) {
-        Some(stage_clap_bundle(&clap_binary, &wrapper_stage_dir)?)
+        Some(stage_clap_bundle(
+            &clap_binary,
+            &compiler_worker_binary,
+            &wrapper_stage_dir,
+        )?)
     } else {
         None
     };
@@ -268,20 +274,33 @@ fn built_clap_binary_path(workspace_root: &Path, profile: BuildProfile) -> Resul
     Ok(artifact_path)
 }
 
-fn stage_clap_artifact(clap_binary: &Path, package_dir: &Path) -> Result<PathBuf, String> {
+fn stage_clap_artifact(
+    clap_binary: &Path,
+    compiler_worker_binary: &Path,
+    package_dir: &Path,
+) -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
         let bundle_dir = package_dir.join(format!("{PRODUCT_NAME}.clap"));
         let contents_dir = bundle_dir.join("Contents");
         let macos_dir = contents_dir.join("MacOS");
+        let resources_dir = contents_dir.join("Resources");
         let plist_path = contents_dir.join("Info.plist");
         fs::create_dir_all(&macos_dir).map_err(io_error)?;
+        fs::create_dir_all(&resources_dir).map_err(io_error)?;
 
         let entrypoint = macos_dir.join(PRODUCT_SLUG);
         if entrypoint.exists() {
             remove_path_if_exists(&entrypoint)?;
         }
         fs::copy(clap_binary, &entrypoint).map_err(io_error)?;
+
+        let worker_target = resources_dir.join(compiler_worker_binary_name());
+        if worker_target.exists() {
+            remove_path_if_exists(&worker_target)?;
+        }
+        fs::copy(compiler_worker_binary, worker_target).map_err(io_error)?;
+
         fs::write(plist_path, clap_info_plist()).map_err(io_error)?;
         Ok(bundle_dir)
     }
@@ -294,24 +313,44 @@ fn stage_clap_artifact(clap_binary: &Path, package_dir: &Path) -> Result<PathBuf
             remove_path_if_exists(&artifact_path)?;
         }
         fs::copy(clap_binary, &artifact_path).map_err(io_error)?;
+
+        let worker_path = package_dir.join(compiler_worker_binary_name());
+        if worker_path.exists() {
+            remove_path_if_exists(&worker_path)?;
+        }
+        fs::copy(compiler_worker_binary, worker_path).map_err(io_error)?;
+
         Ok(artifact_path)
     }
 }
 
-fn stage_clap_bundle(clap_binary: &Path, wrapper_stage_dir: &Path) -> Result<PathBuf, String> {
+fn stage_clap_bundle(
+    clap_binary: &Path,
+    compiler_worker_binary: &Path,
+    wrapper_stage_dir: &Path,
+) -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
         let bundle_dir = wrapper_stage_dir.join(format!("{PRODUCT_NAME}.clap"));
         let contents_dir = bundle_dir.join("Contents");
         let macos_dir = contents_dir.join("MacOS");
+        let resources_dir = contents_dir.join("Resources");
         let plist_path = contents_dir.join("Info.plist");
         fs::create_dir_all(&macos_dir).map_err(io_error)?;
+        fs::create_dir_all(&resources_dir).map_err(io_error)?;
 
         let entrypoint = macos_dir.join(PRODUCT_SLUG);
         if entrypoint.exists() {
             remove_path_if_exists(&entrypoint)?;
         }
         fs::copy(clap_binary, &entrypoint).map_err(io_error)?;
+
+        let worker_target = resources_dir.join(compiler_worker_binary_name());
+        if worker_target.exists() {
+            remove_path_if_exists(&worker_target)?;
+        }
+        fs::copy(compiler_worker_binary, worker_target).map_err(io_error)?;
+
         fs::write(plist_path, clap_info_plist()).map_err(io_error)?;
         Ok(bundle_dir)
     }
@@ -324,7 +363,49 @@ fn stage_clap_bundle(clap_binary: &Path, wrapper_stage_dir: &Path) -> Result<Pat
             remove_path_if_exists(&staged)?;
         }
         fs::copy(clap_binary, &staged).map_err(io_error)?;
+
+        let worker_path = wrapper_stage_dir.join(compiler_worker_binary_name());
+        if worker_path.exists() {
+            remove_path_if_exists(&worker_path)?;
+        }
+        fs::copy(compiler_worker_binary, worker_path).map_err(io_error)?;
+
         Ok(staged)
+    }
+}
+
+fn build_compiler_worker(workspace_root: &Path, profile: BuildProfile) -> Result<PathBuf, String> {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(workspace_root)
+        .arg("build")
+        .arg("-p")
+        .arg(COMPILER_WORKER_PACKAGE_NAME);
+    if let Some(flag) = profile.cargo_flag() {
+        command.arg(flag);
+    }
+    run_command(command, "cargo build (compiler-worker)")?;
+
+    let worker_path = workspace_root
+        .join("target")
+        .join(profile.dir_name())
+        .join(compiler_worker_binary_name());
+
+    if !worker_path.exists() {
+        return Err(format!(
+            "missing compiler worker binary at {}",
+            worker_path.display()
+        ));
+    }
+
+    Ok(worker_path)
+}
+
+fn compiler_worker_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "mimium-compiler-worker.exe"
+    } else {
+        "mimium-compiler-worker"
     }
 }
 
@@ -681,8 +762,13 @@ fn stage_wrapper_artifact(
     package_dir: &Path,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(package_dir).map_err(io_error)?;
-    let built_path = find_first_matching_artifact(wrapper_build_dir, format.bundle_extension())?
-        .ok_or_else(|| format!("failed to locate built {} bundle", format.bundle_extension()))?;
+    let expected_path = wrapper_build_dir.join(format!("{PRODUCT_NAME}.{}", format.bundle_extension()));
+    let built_path = if expected_path.exists() {
+        expected_path
+    } else {
+        find_first_matching_artifact(wrapper_build_dir, format.bundle_extension())?
+            .ok_or_else(|| format!("failed to locate built {} bundle", format.bundle_extension()))?
+    };
 
     let destination = package_dir.join(
         built_path

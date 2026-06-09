@@ -13,6 +13,8 @@ pub struct MimiumPluginAudioProcessor<'a> {
     runtime: Option<WasmDspRuntime>,
     sample_time: u64,
     sample_rate: f64,
+    input_left_cache: Vec<f32>,
+    input_right_cache: Vec<f32>,
 }
 
 impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>>
@@ -30,6 +32,8 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
             runtime: None,
             sample_time: 0,
             sample_rate: audio_config.sample_rate,
+            input_left_cache: Vec::new(),
+            input_right_cache: Vec::new(),
         };
         processor.try_swap_runtime();
         Ok(processor)
@@ -61,6 +65,26 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
 
         self.try_swap_runtime();
 
+        self.input_left_cache.clear();
+        self.input_right_cache.clear();
+        if let Some(input_port) = audio.input_port(0) {
+            let input_channels = input_port
+                .channels()?
+                .into_f32()
+                .ok_or(PluginError::Message("Expected f32 input"))?;
+
+            if let Some(left) = input_channels.channel(0) {
+                self.input_left_cache.extend_from_slice(left);
+            }
+
+            if let Some(right) = input_channels.channel(1) {
+                self.input_right_cache.extend_from_slice(right);
+            } else {
+                self.input_right_cache
+                    .extend_from_slice(&self.input_left_cache);
+            }
+        }
+
         let mut output_port = audio
             .output_port(0)
             .ok_or(PluginError::Message("No output port found"))?;
@@ -78,7 +102,19 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
             .ok_or(PluginError::Message("Expected right channel"))?;
 
         for frame in 0..left.len().min(right.len()) {
+            let in_left = self
+                .input_left_cache
+                .get(frame)
+                .copied()
+                .unwrap_or_default() as f64;
+            let in_right = self
+                .input_right_cache
+                .get(frame)
+                .copied()
+                .unwrap_or_default() as f64;
+
             let (out_left, out_right) = if let Some(runtime) = self.runtime.as_mut() {
+                runtime.set_input(&[in_left, in_right]);
                 runtime.run_dsp(Time(self.sample_time));
                 self.sample_time = self.sample_time.saturating_add(1);
 

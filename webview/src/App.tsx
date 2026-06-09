@@ -5,6 +5,7 @@ import logoSvg from "../assets/mimium_logo_slant.svg?raw";
 import { LANGUAGE_ID, registerMimiumLanguage } from "./editor/language";
 import { registerThemes } from "./editor/themes";
 import {
+  compileSource,
   loadExample,
   onPluginMessage,
   requestClipboardRead,
@@ -74,6 +75,9 @@ function App() {
   const hasInitialStateRef = useRef(false);
   const skipNextSyncCompileRef = useRef(false);
   const draggingKnobIndexRef = useRef<number | null>(null);
+  const [compileStatus, setCompileStatus] = useState<"idle" | "pending" | "ok" | "error">(
+    "idle"
+  );
 
   useEffect(() => {
     const editor = monaco.editor.create(document.getElementById(editorContainerId)!, {
@@ -271,8 +275,14 @@ function App() {
       hasInitialStateRef.current = true;
       if (message.ok) {
         setCompileError(null);
+        if (compileStatus === "pending") {
+          setCompileStatus("ok");
+        }
       } else {
         setCompileError(message.message);
+        if (compileStatus === "pending") {
+          setCompileStatus("error");
+        }
       }
 
       if (message.source !== editor.getValue()) {
@@ -294,7 +304,7 @@ function App() {
       disposable.dispose();
       editor.dispose();
     };
-  }, [editorContainerId]);
+  }, [compileStatus, editorContainerId]);
 
   useEffect(() => {
     if (!hasInitialStateRef.current) {
@@ -336,6 +346,11 @@ function App() {
     saveGlobalSettings(libraryPath);
   };
 
+  const handleCompile = () => {
+    setCompileStatus("pending");
+    compileSource();
+  };
+
   const handleLoadExample = (filename: string) => {
     loadExample(filename);
     setIsExamplesOpen(false);
@@ -354,6 +369,14 @@ function App() {
           ☰
         </button>
         <img className="logo-image" src={LOGO_URL} alt="mimium" />
+        <button
+          className="chrome-icon-button compile"
+          onClick={handleCompile}
+          title="Compile"
+          aria-label="Compile"
+        >
+          ▶
+        </button>
         <button
           className="chrome-icon-button right"
           onClick={() => setIsSettingsOpen(true)}
@@ -434,6 +457,16 @@ function App() {
         <aside className="error-float" role="alert" aria-live="assertive">
           <div className="error-float-title">Compile Error</div>
           <pre className="error-float-message">{compileError}</pre>
+        </aside>
+      )}
+      {compileStatus === "pending" && (
+        <aside className="compile-float" aria-live="polite">
+          Compiling...
+        </aside>
+      )}
+      {!compileError && compileStatus === "ok" && (
+        <aside className="compile-float" aria-live="polite">
+          Compiled.
         </aside>
       )}
       <section
