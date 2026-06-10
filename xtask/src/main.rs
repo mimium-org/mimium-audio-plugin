@@ -242,7 +242,7 @@ fn build_webview(workspace_root: &Path) -> Result<(), String> {
         ));
     }
 
-    let mut command = Command::new("pnpm");
+    let mut command = Command::new(tool_executable("pnpm"));
     command.current_dir(&webview_dir);
     command.arg("build");
     run_command(command, "pnpm build (webview)")
@@ -791,6 +791,14 @@ fn stage_wrapper_artifact(
 
 fn env_or_default(key: &str, default: &str) -> String {
     env::var(key).ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| default.to_string())
+}
+
+fn tool_executable(base_name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{base_name}.cmd")
+    } else {
+        base_name.to_string()
+    }
 }
 
 fn print_usage() {
