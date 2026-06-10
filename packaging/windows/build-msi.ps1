@@ -45,7 +45,17 @@ if ($LASTEXITCODE -ne 0) {
     throw 'heat.exe failed'
 }
 
-& $candle -nologo -dProductVersion=$Version -dStagingRoot=$stageRoot -out "$outDir\" $templateWxs $harvestWxs
+$candleArgs = @(
+    '-nologo'
+    "-dProductVersion=$Version"
+    "-dStagingRoot=$stageRoot"
+    '-out'
+    "$outDir\"
+    $templateWxs
+    $harvestWxs
+)
+
+& $candle @candleArgs
 if ($LASTEXITCODE -ne 0) {
     throw 'candle.exe failed'
 }
