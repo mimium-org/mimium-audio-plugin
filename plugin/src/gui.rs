@@ -11,6 +11,9 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+const MAX_SOURCE_BYTES: usize = 512 * 1024;
+const MAX_PENDING_UI_MESSAGES: usize = 512;
+
 const GUI_CONFIG: EmbeddedWebviewConfig = EmbeddedWebviewConfig {
     width: 1180,
     height: 760,
@@ -67,77 +70,103 @@ pub struct MimiumPluginGui {
 }
 
 impl MimiumPluginGui {
-    pub fn new(parent: Window<'_>, shared: &MimiumPluginShared) -> Result<Self, PluginError> {
+    pub fn new(
+        parent: Window<'_>,
+        shared: &MimiumPluginShared,
+    ) -> Result<Self, PluginError> {
         let current_source = Arc::clone(&shared.current_source);
         let compile_feedback = Arc::clone(&shared.compile_feedback);
-        let pending_program = Arc::clone(&shared.pending_program);
+        let pending_compile_results = Arc::clone(&shared.pending_compile_results);
         let pending_ui_messages = Arc::clone(&shared.pending_ui_messages);
+        let pending_host_callback = Arc::clone(&shared.pending_host_callback);
         let state_dirty = Arc::clone(&shared.state_dirty);
         let knobs = Arc::clone(&shared.knobs);
         let global_settings = Arc::clone(&shared.global_settings);
-        let host = unsafe { shared.host.with_arbitrary_lifetime() };
 
         let webview = EmbeddedWebviewGui::new(parent, &GUI_CONFIG, move |msg| {
             match msg.get("type").and_then(|value| value.as_str()) {
                 Some("set_source") => {
+                    eprintln!("[mimium] IPC set_source received");
                     let source = msg
                         .get("source")
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string();
 
+                    if source.len() > MAX_SOURCE_BYTES {
+                        let feedback = CompileFeedback::error(format!(
+                            "Source is too large ({} bytes, limit {} bytes).",
+                            source.len(),
+                            MAX_SOURCE_BYTES
+                        ));
+                        if let Ok(mut state) = compile_feedback.lock() {
+                            *state = feedback.clone();
+                        }
+                        queue_editor_state(&pending_ui_messages, "", &feedback);
+                        request_host_callback(&pending_host_callback);
+                        return;
+                    }
+
+                    let mut changed = false;
                     if let Ok(mut current) = current_source.lock() {
-                        *current = source.clone();
+                        if *current != source {
+                            *current = source;
+                            changed = true;
+                        }
+                    }
+
+                    if !changed {
+                        return;
                     }
 
                     state_dirty.store(true, Ordering::SeqCst);
-
-                    let feedback = compile_feedback
-                        .lock()
-                        .map(|state| state.clone())
-                        .unwrap_or_else(|_| {
-                            CompileFeedback::error("Failed to read compile status.".to_string())
-                        });
-
-                    queue_editor_state(&pending_ui_messages, &source, &feedback);
-                    queue_knob_state(&pending_ui_messages, &knobs);
-                    queue_global_settings(&pending_ui_messages, &global_settings);
-                    queue_example_list(&pending_ui_messages);
-                    queue_about_info(&pending_ui_messages);
-                    host.request_callback();
                 }
                 Some("compile_source") => {
+                    eprintln!("[mimium] IPC compile_source received");
                     let source = current_source.lock().map(|value| value.clone()).unwrap_or_default();
+
+                    if source.len() > MAX_SOURCE_BYTES {
+                        let feedback = CompileFeedback::error(format!(
+                            "Source is too large ({} bytes, limit {} bytes).",
+                            source.len(),
+                            MAX_SOURCE_BYTES
+                        ));
+                        if let Ok(mut state) = compile_feedback.lock() {
+                            *state = feedback.clone();
+                        }
+                        queue_editor_state(&pending_ui_messages, &source, &feedback);
+                        request_host_callback(&pending_host_callback);
+                        return;
+                    }
 
                     let library_path = global_settings
                         .lock()
                         .map(|settings| settings.library_path.clone())
                         .unwrap_or_default();
 
-                    let feedback = match mimium::compile_program(
-                        &source,
+                    let queue_result = mimium::enqueue_compile_task(
+                        source.clone(),
                         Arc::clone(&knobs),
-                        Some(library_path.as_str()),
-                    ) {
-                        Ok(program) => {
-                            knobs.set_names(program.resolved_knob_names.clone());
-                            if let Ok(mut pending) = pending_program.lock() {
-                                *pending = Some(program);
-                            }
-                            CompileFeedback::success(
-                                "Compiled via worker process. The audio thread will swap the program on the next block.",
-                            )
-                        }
-                        Err(error) => CompileFeedback::error(error),
-                    };
+                        Some(library_path),
+                        Arc::clone(&pending_compile_results),
+                        Arc::clone(&pending_host_callback),
+                    );
 
-                    if let Ok(mut state) = compile_feedback.lock() {
-                        *state = feedback.clone();
+                    if let Err(error) = queue_result {
+                        let feedback = CompileFeedback::error(error);
+                        if let Ok(mut state) = compile_feedback.lock() {
+                            *state = feedback.clone();
+                        }
+                        queue_editor_state(&pending_ui_messages, &source, &feedback);
+                    } else {
+                        if let Ok(mut state) = compile_feedback.lock() {
+                            *state = CompileFeedback::success(
+                                "Compile job accepted. Waiting for worker result.",
+                            );
+                        }
                     }
 
-                    queue_editor_state(&pending_ui_messages, &source, &feedback);
-                    queue_knob_state(&pending_ui_messages, &knobs);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("request_state") => {
                     let source = current_source.lock().map(|value| value.clone()).unwrap_or_default();
@@ -152,7 +181,7 @@ impl MimiumPluginGui {
                     queue_global_settings(&pending_ui_messages, &global_settings);
                     queue_example_list(&pending_ui_messages);
                     queue_about_info(&pending_ui_messages);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("set_knob") => {
                     let index = msg
@@ -175,12 +204,12 @@ impl MimiumPluginGui {
 
                     state_dirty.store(true, Ordering::SeqCst);
                     queue_knob_state(&pending_ui_messages, &knobs);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("request_global_settings") => {
                     queue_global_settings(&pending_ui_messages, &global_settings);
                     queue_about_info(&pending_ui_messages);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("save_global_settings") => {
                     let library_path = msg
@@ -217,11 +246,11 @@ impl MimiumPluginGui {
                             .as_str(),
                     );
                     queue_global_settings(&pending_ui_messages, &global_settings);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("request_examples") => {
                     queue_example_list(&pending_ui_messages);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("load_example") => {
                     let Some(filename) = msg.get("filename").and_then(|value| value.as_str()) else {
@@ -251,7 +280,7 @@ impl MimiumPluginGui {
                     queue_editor_state(&pending_ui_messages, &source, &feedback);
                     queue_knob_state(&pending_ui_messages, &knobs);
                     queue_example_list(&pending_ui_messages);
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 Some("clipboard_write") => {
                     let text = msg
@@ -285,7 +314,7 @@ impl MimiumPluginGui {
                         result.1,
                         &result.2,
                     );
-                    host.request_callback();
+                    request_host_callback(&pending_host_callback);
                 }
                 _ => {}
             }
@@ -299,8 +328,18 @@ impl MimiumPluginGui {
     }
 
     pub fn send_raw_message(&self, json: &str) {
-        let js = format!("window.__onPluginMessage && window.__onPluginMessage({json})");
-        self.webview.evaluate_script(&js);
+        let Ok(payload_literal) = serde_json::to_string(json) else {
+            eprintln!("[mimium] failed to encode ui message payload");
+            return;
+        };
+
+        let js = format!(
+            "(() => {{ const handler = window.__onPluginMessage; if (!handler) return; try {{ handler(JSON.parse({payload_literal})); }} catch (error) {{ console.error('mimium ui message parse failed', error); }} }})();"
+        );
+
+        if let Err(error) = self.webview.evaluate_script(&js) {
+            eprintln!("[mimium] webview evaluate_script failed: {error}");
+        }
     }
 
     pub fn send_editor_state(&self, source: &str, feedback: &CompileFeedback) {
@@ -361,9 +400,7 @@ pub(crate) fn queue_clipboard_read_result(
         text,
         message: message.to_string(),
     }) {
-        if let Ok(mut queue) = queue.lock() {
-            queue.push(json);
-        }
+        push_ui_message(queue, json);
     }
 }
 
@@ -377,9 +414,7 @@ pub(crate) fn queue_editor_state(
         ok: feedback.ok,
         message: feedback.message.clone(),
     }) {
-        if let Ok(mut queue) = queue.lock() {
-            queue.push(json);
-        }
+        push_ui_message(queue, json);
     }
 }
 
@@ -387,9 +422,7 @@ pub(crate) fn queue_knob_state(queue: &std::sync::Mutex<Vec<String>>, knobs: &Kn
     if let Ok(json) = serde_json::to_string(&PluginMessage::KnobState {
         knobs: snapshot_knobs(knobs),
     }) {
-        if let Ok(mut queue) = queue.lock() {
-            queue.push(json);
-        }
+        push_ui_message(queue, json);
     }
 }
 
@@ -401,9 +434,7 @@ pub(crate) fn queue_global_settings(
         if let Ok(json) = serde_json::to_string(&PluginMessage::GlobalSettings {
             settings: settings.clone(),
         }) {
-            if let Ok(mut queue) = queue.lock() {
-                queue.push(json);
-            }
+            push_ui_message(queue, json);
         }
     }
 }
@@ -417,9 +448,7 @@ pub(crate) fn queue_save_settings_result(
         ok,
         message: message.to_string(),
     }) {
-        if let Ok(mut queue) = queue.lock() {
-            queue.push(json);
-        }
+        push_ui_message(queue, json);
     }
 }
 
@@ -427,9 +456,7 @@ pub(crate) fn queue_example_list(queue: &std::sync::Mutex<Vec<String>>) {
     if let Ok(json) = serde_json::to_string(&PluginMessage::ExampleList {
         examples: snapshot_examples(),
     }) {
-        if let Ok(mut queue) = queue.lock() {
-            queue.push(json);
-        }
+        push_ui_message(queue, json);
     }
 }
 
@@ -437,9 +464,18 @@ pub(crate) fn queue_about_info(queue: &std::sync::Mutex<Vec<String>>) {
     if let Ok(json) = serde_json::to_string(&PluginMessage::AboutInfo {
         about: plugin_about_info(),
     }) {
-        if let Ok(mut queue) = queue.lock() {
-            queue.push(json);
+        push_ui_message(queue, json);
+    }
+}
+
+fn push_ui_message(queue: &std::sync::Mutex<Vec<String>>, json: String) {
+    if let Ok(mut queue) = queue.lock() {
+        if queue.len() >= MAX_PENDING_UI_MESSAGES {
+            let drop_count = queue.len() - MAX_PENDING_UI_MESSAGES + 1;
+            queue.drain(0..drop_count);
+            eprintln!("[mimium] pending_ui_messages overflow; dropped {drop_count} old message(s)");
         }
+        queue.push(json);
     }
 }
 
@@ -461,6 +497,10 @@ fn snapshot_examples() -> Vec<ExampleSummary> {
             filename: example.filename,
         })
         .collect()
+}
+
+fn request_host_callback(pending_host_callback: &Arc<std::sync::atomic::AtomicBool>) {
+    pending_host_callback.store(true, Ordering::SeqCst);
 }
 
 impl<'a> PluginGuiImpl for MimiumPluginMainThread<'a> {
@@ -485,6 +525,11 @@ impl<'a> PluginGuiImpl for MimiumPluginMainThread<'a> {
     }
 
     fn destroy(&mut self) {
+        if let (Some(timer_ext), Some(timer_id)) = (self.host_timer, self.ui_timer_id.take()) {
+            if let Err(error) = timer_ext.unregister_timer(&mut self.host, timer_id) {
+                eprintln!("[mimium] failed to unregister UI timer: {error:?}");
+            }
+        }
         self.gui = None;
     }
 
@@ -508,6 +553,19 @@ impl<'a> PluginGuiImpl for MimiumPluginMainThread<'a> {
 
     fn set_parent(&mut self, window: Window) -> Result<(), PluginError> {
         self.gui = Some(MimiumPluginGui::new(window, self.shared)?);
+
+        if self.ui_timer_id.is_none() {
+            if let Some(timer_ext) = self.host_timer {
+                match timer_ext.register_timer(&mut self.host, 33) {
+                    Ok(timer_id) => {
+                        self.ui_timer_id = Some(timer_id);
+                    }
+                    Err(error) => {
+                        eprintln!("[mimium] failed to register UI timer: {error:?}");
+                    }
+                }
+            }
+        }
 
         if let Some(gui) = &self.gui {
             let source = self

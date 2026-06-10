@@ -6,6 +6,8 @@ use std::process::Command;
 use url::Url;
 use wry::{NewWindowResponse, WebView, WebViewBuilder};
 
+const MAX_IPC_BODY_BYTES: usize = 1024 * 1024;
+
 #[cfg(not(debug_assertions))]
 const DISABLE_CONTEXT_MENU_SCRIPT: &str = r#"
 window.addEventListener(
@@ -93,7 +95,7 @@ impl EmbeddedWebviewGui {
         ipc_handler: F,
     ) -> Result<Self, PluginError>
     where
-        F: Fn(Value) + Send + 'static,
+        F: Fn(Value) + 'static,
     {
         let parent_handle = PluginParentWindow::from_clap_window(&parent)
             .ok_or(PluginError::Message("Unsupported window type"))?;
@@ -102,6 +104,14 @@ impl EmbeddedWebviewGui {
         let mut builder = WebViewBuilder::new()
             .with_ipc_handler(move |request| {
                 let body = request.body();
+                if body.len() > MAX_IPC_BODY_BYTES {
+                    eprintln!(
+                        "[mimium] dropped oversized IPC body: {} bytes (limit {})",
+                        body.len(),
+                        MAX_IPC_BODY_BYTES
+                    );
+                    return;
+                }
                 if let Ok(message) = serde_json::from_str::<Value>(body) {
                     ipc_handler(message);
                 }
@@ -142,8 +152,10 @@ impl EmbeddedWebviewGui {
         });
     }
 
-    pub fn evaluate_script(&self, script: &str) {
-        let _ = self.webview.evaluate_script(script);
+    pub fn evaluate_script(&self, script: &str) -> Result<(), String> {
+        self.webview
+            .evaluate_script(script)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -201,9 +213,6 @@ fn spawn_external_browser(url: &str) -> std::io::Result<()> {
 }
 
 struct PluginParentWindow(RawWindowHandle);
-
-unsafe impl Send for PluginParentWindow {}
-unsafe impl Sync for PluginParentWindow {}
 
 impl HasWindowHandle for PluginParentWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {

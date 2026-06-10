@@ -1,16 +1,19 @@
 use crate::params::{KnobBank, KNOB_COUNT};
 use base64::Engine;
 use mimium_lang::compiler::{EvalStage, IoChannelInfo};
-use mimium_lang::interner::{Symbol, TypeNodeId};
+use mimium_lang::interner::ToSymbol;
 use mimium_lang::plugin::ExtFunTypeInfo;
 use mimium_lang::runtime::wasm::WasmPluginFnMap;
 use mimium_lang::runtime::wasm::WasmPluginFn;
 use mimium_lang::runtime::wasm::engine::{WasmDspRuntime, WasmEngine};
+use mimium_lang::types::{PType, Type};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::thread;
 
 pub(crate) const DEFAULT_SOURCE: &str = r#"let twopi = 6.283185307179586
 
@@ -57,12 +60,83 @@ pub(crate) struct PreparedProgram {
     pub(crate) resolved_knob_names: [String; KNOB_COUNT],
 }
 
+pub(crate) struct CompileTaskResult {
+    pub(crate) source: String,
+    pub(crate) feedback: CompileFeedback,
+    pub(crate) program: Option<PreparedProgram>,
+}
+
+struct CompileTask {
+    source: String,
+    knobs: Arc<KnobBank>,
+    library_path: Option<String>,
+    result_sink: Arc<Mutex<Vec<CompileTaskResult>>>,
+    pending_host_callback: Arc<AtomicBool>,
+}
+
 pub(crate) fn compile_program(
     source: &str,
     knobs: Arc<KnobBank>,
     library_path: Option<&str>,
 ) -> Result<PreparedProgram, String> {
     compile_program_subprocess(source, knobs, library_path)
+}
+
+pub(crate) fn enqueue_compile_task(
+    source: String,
+    knobs: Arc<KnobBank>,
+    library_path: Option<String>,
+    result_sink: Arc<Mutex<Vec<CompileTaskResult>>>,
+    pending_host_callback: Arc<AtomicBool>,
+) -> Result<(), String> {
+    static DISPATCHER: OnceLock<mpsc::Sender<CompileTask>> = OnceLock::new();
+    let tx = DISPATCHER.get_or_init(spawn_compile_dispatcher).clone();
+    tx.send(CompileTask {
+        source,
+        knobs,
+        library_path,
+        result_sink,
+        pending_host_callback,
+    })
+    .map_err(|error| format!("failed to queue compile task: {error}"))
+}
+
+fn spawn_compile_dispatcher() -> mpsc::Sender<CompileTask> {
+    let (tx, rx) = mpsc::channel::<CompileTask>();
+    let _ = thread::Builder::new()
+        .name("mimium-compile-dispatcher".to_string())
+        .spawn(move || run_compile_dispatcher(rx));
+    tx
+}
+
+fn run_compile_dispatcher(rx: mpsc::Receiver<CompileTask>) {
+    for task in rx {
+        let result = compile_program_subprocess(
+            &task.source,
+            Arc::clone(&task.knobs),
+            task.library_path.as_deref(),
+        );
+
+        let outcome = match result {
+            Ok(program) => CompileTaskResult {
+                source: task.source,
+                feedback: CompileFeedback::success(
+                    "Compiled via worker process. The audio thread will swap the program on the next block.",
+                ),
+                program: Some(program),
+            },
+            Err(error) => CompileTaskResult {
+                source: task.source,
+                feedback: CompileFeedback::error(error),
+                program: None,
+            },
+        };
+
+        if let Ok(mut sink) = task.result_sink.lock() {
+            sink.push(outcome);
+        }
+        task.pending_host_callback.store(true, Ordering::SeqCst);
+    }
 }
 
 fn compile_program_subprocess(
@@ -76,36 +150,10 @@ fn compile_program_subprocess(
         initial_knob_names: knobs.snapshot_names().to_vec(),
     };
 
-    let mut child = Command::new(worker_command())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to spawn compiler worker: {error}"))?;
+    let response = worker_pool_request(&request)?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let payload = serde_json::to_vec(&request)
-            .map_err(|error| format!("failed to serialize worker request: {error}"))?;
-        stdin
-            .write_all(&payload)
-            .map_err(|error| format!("failed to write worker request: {error}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("failed to wait for compiler worker: {error}"))?;
-
-    let response: WorkerCompileResponse = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to decode worker response: {error}"))?;
-
-    if !output.status.success() || !response.ok {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let worker_error = if stderr.trim().is_empty() {
-            response.message
-        } else {
-            format!("{}\n{}", response.message, stderr.trim())
-        };
-        return Err(worker_error);
+    if !response.ok {
+        return Err(response.message);
     }
 
     let wasm_base64 = response
@@ -133,14 +181,155 @@ fn compile_program_subprocess(
             .decode(wasm_base64)
             .map_err(|error| format!("failed to decode worker wasm: {error}"))?,
         io_channels,
-        ext_fns: response
-            .ext_fns
-            .into_iter()
-            .map(|info| ExtFunTypeInfo::new(info.name, info.ty, info.stage))
-            .collect(),
+        ext_fns: decode_ext_fns(&response.ext_fns),
         wasm_plugin_fns: Some(make_wasm_plugin_fns(knobs)),
         resolved_knob_names,
     })
+}
+
+fn decode_ext_fns(worker_ext_fns: &[SerializableExtFunTypeInfo]) -> Vec<ExtFunTypeInfo> {
+    worker_ext_fns
+        .iter()
+        .map(|info| {
+            let arg_ty = arg_type_from_signature(&info.params);
+            let ret_ty = return_type_from_signature(&info.returns);
+            let fn_ty = Type::Function {
+                arg: arg_ty.into_id(),
+                ret: ret_ty.into_id(),
+            }
+            .into_id();
+
+            ExtFunTypeInfo::new(info.name.as_str().to_symbol(), fn_ty, info.stage)
+        })
+        .collect()
+}
+
+fn arg_type_from_signature(parts: &[SerializableWasmValType]) -> Type {
+    match parts {
+        [] => Type::Tuple(Vec::new()),
+        [single] => wasm_valtype_to_mimium_type(*single),
+        _ => Type::Tuple(
+            parts
+                .iter()
+                .map(|part| wasm_valtype_to_mimium_type(*part).into_id())
+                .collect(),
+        ),
+    }
+}
+
+fn return_type_from_signature(parts: &[SerializableWasmValType]) -> Type {
+    match parts {
+        [] => Type::Primitive(PType::Unit),
+        [single] => wasm_valtype_to_mimium_type(*single),
+        _ => Type::Tuple(
+            parts
+                .iter()
+                .map(|part| wasm_valtype_to_mimium_type(*part).into_id())
+                .collect(),
+        ),
+    }
+}
+
+fn wasm_valtype_to_mimium_type(valtype: SerializableWasmValType) -> Type {
+    match valtype {
+        SerializableWasmValType::I32 => Type::Primitive(PType::Int),
+        SerializableWasmValType::I64 => Type::Primitive(PType::Int),
+        SerializableWasmValType::F32 => Type::Primitive(PType::Numeric),
+        SerializableWasmValType::F64 => Type::Primitive(PType::Numeric),
+    }
+}
+
+fn worker_pool_request(request: &WorkerCompileRequest) -> Result<WorkerCompileResponse, String> {
+    static WORKER_POOL: OnceLock<Mutex<Option<PersistentWorkerClient>>> = OnceLock::new();
+    let pool = WORKER_POOL.get_or_init(|| Mutex::new(None));
+
+    let mut guard = pool
+        .lock()
+        .map_err(|_| "compiler worker mutex was poisoned".to_string())?;
+
+    if guard.is_none() {
+        *guard = Some(PersistentWorkerClient::spawn()?);
+    }
+
+    let first_try = guard
+        .as_mut()
+        .ok_or_else(|| "compiler worker client is not available".to_string())?
+        .request(request);
+
+    match first_try {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            eprintln!("[mimium] compiler worker request failed once: {error}; restarting worker");
+            *guard = Some(PersistentWorkerClient::spawn()?);
+            guard
+                .as_mut()
+                .ok_or_else(|| "compiler worker client is not available after restart".to_string())?
+                .request(request)
+                .map_err(|retry_error| {
+                    format!(
+                        "compiler worker request failed after restart: {retry_error}"
+                    )
+                })
+        }
+    }
+}
+
+struct PersistentWorkerClient {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl PersistentWorkerClient {
+    fn spawn() -> Result<Self, String> {
+        let mut child = Command::new(worker_command())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("failed to spawn compiler worker: {error}"))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "compiler worker stdin is unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "compiler worker stdout is unavailable".to_string())?;
+
+        Ok(Self {
+            _child: child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn request(&mut self, request: &WorkerCompileRequest) -> Result<WorkerCompileResponse, String> {
+        let payload = serde_json::to_string(request)
+            .map_err(|error| format!("failed to serialize worker request: {error}"))?;
+        self.stdin
+            .write_all(payload.as_bytes())
+            .map_err(|error| format!("failed to write worker request: {error}"))?;
+        self.stdin
+            .write_all(b"\n")
+            .map_err(|error| format!("failed to terminate worker request: {error}"))?;
+        self.stdin
+            .flush()
+            .map_err(|error| format!("failed to flush worker request: {error}"))?;
+
+        let mut line = String::new();
+        let read = self
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("failed to read worker response: {error}"))?;
+        if read == 0 {
+            return Err("compiler worker closed stdout".to_string());
+        }
+
+        serde_json::from_str::<WorkerCompileResponse>(line.trim_end())
+            .map_err(|error| format!("failed to decode worker response: {error}"))
+    }
 }
 
 pub(crate) fn build_runtime(
@@ -279,10 +468,19 @@ struct SerializableIoChannelInfo {
     output: u32,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct SerializableExtFunTypeInfo {
-    name: Symbol,
-    ty: TypeNodeId,
+    name: String,
     stage: EvalStage,
+    params: Vec<SerializableWasmValType>,
+    returns: Vec<SerializableWasmValType>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+enum SerializableWasmValType {
+    I32,
+    I64,
+    F32,
+    F64,
 }
 

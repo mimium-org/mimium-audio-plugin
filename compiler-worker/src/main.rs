@@ -2,7 +2,7 @@ use base64::Engine;
 use mimium_lang::ast::{Expr, Literal};
 use mimium_lang::compiler::{EvalStage, IoChannelInfo};
 use mimium_lang::function;
-use mimium_lang::interner::{Symbol, ToSymbol, TypeNodeId};
+use mimium_lang::interner::{ToSymbol, TypeNodeId};
 use mimium_lang::interpreter::Value;
 use mimium_lang::numeric;
 use mimium_lang::plugin::{SysPluginSignature, SystemPlugin, SystemPluginFnType, SystemPluginMacroType};
@@ -13,7 +13,7 @@ use mimium_lang::{Config, ExecContext};
 use mimium_plugin_macros::mimium_plugin_fn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 
 const GET_SLIDER_FN: &str = "__get_slider";
 const KNOB_COUNT: usize = 8;
@@ -41,11 +41,20 @@ struct SerializableIoChannelInfo {
     output: u32,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SerializableExtFunTypeInfo {
-    name: Symbol,
-    ty: TypeNodeId,
+    name: String,
     stage: EvalStage,
+    params: Vec<SerializableWasmValType>,
+    returns: Vec<SerializableWasmValType>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+enum SerializableWasmValType {
+    I32,
+    I64,
+    F32,
+    F64,
 }
 
 #[derive(Clone)]
@@ -217,6 +226,66 @@ fn validate_channels(io: Option<IoChannelInfo>) -> Result<(), String> {
     Ok(())
 }
 
+fn ext_type_to_signature(
+    info: &mimium_lang::plugin::ExtFunTypeInfo,
+) -> (Vec<SerializableWasmValType>, Vec<SerializableWasmValType>) {
+    let fn_ty = info.ty.to_type();
+    let Type::Function { arg, ret } = fn_ty else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let params = match arg.to_type() {
+        Type::Primitive(mimium_lang::types::PType::Unit) => Vec::new(),
+        Type::Tuple(elements) => elements
+            .iter()
+            .map(|item| mimium_type_to_wire_valtype(&item.to_type()))
+            .collect(),
+        single => vec![mimium_type_to_wire_valtype(&single)],
+    };
+
+    let returns = match ret.to_type() {
+        Type::Primitive(mimium_lang::types::PType::Unit) => Vec::new(),
+        Type::Tuple(elements) => elements
+            .iter()
+            .map(|item| mimium_type_to_wire_valtype(&item.to_type()))
+            .collect(),
+        single => vec![mimium_type_to_wire_valtype(&single)],
+    };
+
+    (params, returns)
+}
+
+fn mimium_type_to_wire_valtype(ty: &Type) -> SerializableWasmValType {
+    use mimium_lang::types::PType;
+
+    match ty {
+        Type::Primitive(PType::Numeric) => SerializableWasmValType::F64,
+        Type::Primitive(PType::Int) => SerializableWasmValType::I64,
+        Type::Primitive(PType::String) => SerializableWasmValType::I64,
+        Type::Primitive(PType::Unit) => SerializableWasmValType::I64,
+        Type::Function { .. } => SerializableWasmValType::I64,
+        Type::Record(fields) if fields.len() == 1 => {
+            mimium_type_to_wire_valtype(&fields[0].ty.to_type())
+        }
+        Type::Tuple(elems) if elems.len() == 1 => {
+            mimium_type_to_wire_valtype(&elems[0].to_type())
+        }
+        Type::Tuple(_) | Type::Record(_) => SerializableWasmValType::I64,
+        Type::Array(_) => SerializableWasmValType::I64,
+        Type::Union(_) | Type::UserSum { .. } => SerializableWasmValType::I64,
+        Type::Ref(_) => SerializableWasmValType::I64,
+        Type::Boxed(_) => SerializableWasmValType::I64,
+        Type::Code(_) => SerializableWasmValType::I64,
+        Type::Intermediate(cell) => {
+            let tv = cell.read().unwrap();
+            tv.parent.as_ref().map_or(SerializableWasmValType::I64, |parent| {
+                mimium_type_to_wire_valtype(&parent.to_type())
+            })
+        }
+        _ => SerializableWasmValType::I64,
+    }
+}
+
 fn compile(req: CompileRequest) -> Result<CompileResponse, String> {
     let _lib_path_guard = EnvVarGuard::set("MIMIUM_LIB_PATH", req.library_path.as_deref());
 
@@ -264,10 +333,14 @@ fn compile(req: CompileRequest) -> Result<CompileResponse, String> {
     let ext_fns = wasm_output
         .ext_fns
         .into_iter()
-        .map(|info| SerializableExtFunTypeInfo {
-            name: info.name,
-            ty: info.ty,
-            stage: info.stage,
+        .map(|info| {
+            let (params, returns) = ext_type_to_signature(&info);
+            SerializableExtFunTypeInfo {
+                name: info.name.as_str().to_string(),
+                stage: info.stage,
+                params,
+                returns,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -285,56 +358,68 @@ fn compile(req: CompileRequest) -> Result<CompileResponse, String> {
 }
 
 fn main() {
-    let mut input = String::new();
-    let result = std::io::stdin().read_to_string(&mut input);
-    if result.is_err() {
-        let _ = write_response(CompileResponse {
-            ok: false,
-            message: "failed to read compile request".to_string(),
-            wasm_base64: None,
-            io_channels: None,
-            ext_fns: Vec::new(),
-            resolved_knob_names: Vec::new(),
-        });
-        std::process::exit(1);
-    }
+    let stdin = std::io::stdin();
+    let mut lines = BufReader::new(stdin.lock()).lines();
 
-    let request = serde_json::from_str::<CompileRequest>(&input);
-    let response = match request {
-        Ok(req) => match compile(req) {
-            Ok(ok) => ok,
+    while let Some(line_result) = lines.next() {
+        let Ok(line) = line_result else {
+            let _ = write_response(CompileResponse {
+                ok: false,
+                message: "failed to read compile request".to_string(),
+                wasm_base64: None,
+                io_channels: None,
+                ext_fns: Vec::new(),
+                resolved_knob_names: Vec::new(),
+            });
+            break;
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request = serde_json::from_str::<CompileRequest>(&line);
+        let response = match request {
+            Ok(req) => match compile(req) {
+                Ok(ok) => ok,
+                Err(error) => CompileResponse {
+                    ok: false,
+                    message: error,
+                    wasm_base64: None,
+                    io_channels: None,
+                    ext_fns: Vec::new(),
+                    resolved_knob_names: Vec::new(),
+                },
+            },
             Err(error) => CompileResponse {
                 ok: false,
-                message: error,
+                message: format!("invalid compile request: {error}"),
                 wasm_base64: None,
                 io_channels: None,
                 ext_fns: Vec::new(),
                 resolved_knob_names: Vec::new(),
             },
-        },
-        Err(error) => CompileResponse {
-            ok: false,
-            message: format!("invalid compile request: {error}"),
-            wasm_base64: None,
-            io_channels: None,
-            ext_fns: Vec::new(),
-            resolved_knob_names: Vec::new(),
-        },
-    };
+        };
 
-    let ok = response.ok;
-    let _ = write_response(response);
-    if !ok {
-        std::process::exit(1);
+        if write_response(response).is_err() {
+            break;
+        }
     }
 }
 
 fn write_response(response: CompileResponse) -> Result<(), String> {
     let serialized = serde_json::to_string(&response)
         .map_err(|error| format!("failed to serialize response: {error}"))?;
-    std::io::stdout()
+    let mut stdout = std::io::stdout().lock();
+    stdout
         .write_all(serialized.as_bytes())
-        .map_err(|error| format!("failed to write response: {error}"))
+        .map_err(|error| format!("failed to write response: {error}"))?;
+    stdout
+        .write_all(b"\n")
+        .map_err(|error| format!("failed to terminate response line: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush response: {error}"))
 }
 
 struct EnvVarGuard {

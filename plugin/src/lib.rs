@@ -1,4 +1,4 @@
-use crate::gui::MimiumPluginGui;
+use crate::gui::{queue_editor_state, queue_knob_state, MimiumPluginGui};
 use crate::mimium::{compile_program, CompileFeedback};
 use crate::params::KnobBank;
 use crate::processor::MimiumPluginAudioProcessor;
@@ -10,6 +10,7 @@ use clack_extensions::audio_ports::{
 use clack_extensions::gui::PluginGui;
 use clack_extensions::params::PluginParams;
 use clack_extensions::state::{HostState, PluginState, PluginStateImpl};
+use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ mod params;
 mod processor;
 mod settings;
 mod webview_gui;
+
+const MAX_PERSISTED_STATE_BYTES: usize = 1024 * 1024;
 
 pub struct MimiumPlugin;
 
@@ -40,7 +43,8 @@ impl Plugin for MimiumPlugin {
             .register::<PluginAudioPorts>()
             .register::<PluginGui>()
             .register::<PluginParams>()
-            .register::<PluginState>();
+            .register::<PluginState>()
+            .register::<PluginTimer>();
     }
 }
 
@@ -52,7 +56,7 @@ impl DefaultPluginFactory for MimiumPlugin {
             .with_features([SYNTHESIZER, STEREO, INSTRUMENT])
     }
 
-    fn new_shared(host: HostSharedHandle<'_>) -> Result<Self::Shared<'_>, PluginError> {
+    fn new_shared(_host: HostSharedHandle<'_>) -> Result<Self::Shared<'_>, PluginError> {
         let knobs = Arc::new(KnobBank::new());
         let global_settings = load_global_settings();
         let source = mimium::DEFAULT_SOURCE.to_string();
@@ -81,10 +85,11 @@ impl DefaultPluginFactory for MimiumPlugin {
             compile_feedback: Arc::new(Mutex::new(compile_feedback)),
             knobs,
             pending_program: Arc::new(Mutex::new(pending_program)),
+            pending_compile_results: Arc::new(Mutex::new(Vec::new())),
             pending_ui_messages: Arc::new(Mutex::new(Vec::new())),
+            pending_host_callback: Arc::new(AtomicBool::new(false)),
             state_dirty: Arc::new(AtomicBool::new(false)),
             global_settings: Arc::new(Mutex::new(global_settings)),
-            host: unsafe { host.with_arbitrary_lifetime() },
         })
     }
 
@@ -93,11 +98,14 @@ impl DefaultPluginFactory for MimiumPlugin {
         shared: &'a Self::Shared<'a>,
     ) -> Result<Self::MainThread<'a>, PluginError> {
         let host_state = host.get_extension::<HostState>();
+        let host_timer = host.get_extension::<HostTimer>();
         Ok(MimiumPluginMainThread {
             shared,
             gui: None,
             host,
             host_state,
+            host_timer,
+            ui_timer_id: None,
         })
     }
 }
@@ -107,10 +115,11 @@ pub struct MimiumPluginShared {
     pub(crate) compile_feedback: Arc<Mutex<CompileFeedback>>,
     pub(crate) knobs: Arc<KnobBank>,
     pub(crate) pending_program: Arc<Mutex<Option<mimium::PreparedProgram>>>,
+    pub(crate) pending_compile_results: Arc<Mutex<Vec<mimium::CompileTaskResult>>>,
     pub(crate) pending_ui_messages: Arc<Mutex<Vec<String>>>,
+    pub(crate) pending_host_callback: Arc<AtomicBool>,
     pub(crate) state_dirty: Arc<AtomicBool>,
     pub(crate) global_settings: Arc<Mutex<settings::GlobalSettings>>,
-    pub(crate) host: HostSharedHandle<'static>,
 }
 
 impl PluginShared<'_> for MimiumPluginShared {}
@@ -120,24 +129,56 @@ pub struct MimiumPluginMainThread<'a> {
     pub(crate) gui: Option<MimiumPluginGui>,
     pub(crate) host: HostMainThreadHandle<'a>,
     pub(crate) host_state: Option<HostState>,
+    pub(crate) host_timer: Option<HostTimer>,
+    pub(crate) ui_timer_id: Option<TimerId>,
 }
 
 impl<'a> PluginMainThread<'a, MimiumPluginShared> for MimiumPluginMainThread<'a> {
     fn on_main_thread(&mut self) {
+        if let Ok(mut results) = self.shared.pending_compile_results.lock() {
+            for result in results.drain(..) {
+                if let Some(program) = result.program {
+                    self.shared.knobs.set_names(program.resolved_knob_names.clone());
+                    if let Ok(mut pending) = self.shared.pending_program.lock() {
+                        *pending = Some(program);
+                    }
+                }
+
+                if let Ok(mut feedback) = self.shared.compile_feedback.lock() {
+                    *feedback = result.feedback.clone();
+                }
+
+                queue_editor_state(&self.shared.pending_ui_messages, &result.source, &result.feedback);
+                queue_knob_state(&self.shared.pending_ui_messages, &self.shared.knobs);
+            }
+        }
+
         if self.shared.state_dirty.swap(false, Ordering::SeqCst) {
             if let Some(mut state) = self.host_state {
+                eprintln!("[mimium] mark_dirty requested");
                 state.mark_dirty(&self.host);
+            } else {
+                eprintln!("[mimium] host does not provide HostState extension; dirty mark skipped");
             }
         }
 
         if let Some(gui) = &self.gui {
             if let Ok(mut queue) = self.shared.pending_ui_messages.lock() {
+                if !queue.is_empty() {
+                    eprintln!("[mimium] on_main_thread draining {} ui message(s)", queue.len());
+                }
                 for message in queue.drain(..) {
                     gui.send_raw_message(&message);
                 }
             }
+        }
+    }
+}
 
-            gui.send_knob_state(self.shared);
+impl PluginTimerImpl for MimiumPluginMainThread<'_> {
+    fn on_timer(&mut self, timer_id: TimerId) {
+        if self.ui_timer_id.is_some_and(|id| id == timer_id) {
+            <Self as PluginMainThread<MimiumPluginShared>>::on_main_thread(self);
         }
     }
 }
@@ -152,6 +193,7 @@ struct PersistedPluginState {
 
 impl PluginStateImpl for MimiumPluginMainThread<'_> {
     fn save(&mut self, output: &mut OutputStream) -> Result<(), PluginError> {
+        eprintln!("[mimium] PluginState::save called");
         let source = self
             .shared
             .current_source
@@ -175,8 +217,21 @@ impl PluginStateImpl for MimiumPluginMainThread<'_> {
     }
 
     fn load(&mut self, input: &mut InputStream) -> Result<(), PluginError> {
-        let mut data = Vec::new();
-        input.read_to_end(&mut data)?;
+        eprintln!("[mimium] PluginState::load called");
+        let mut data = Vec::with_capacity(16 * 1024);
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = input.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+
+            if data.len().saturating_add(read) > MAX_PERSISTED_STATE_BYTES {
+                return Err(PluginError::Message("Persisted state is too large."));
+            }
+
+            data.extend_from_slice(&chunk[..read]);
+        }
 
         if data.is_empty() {
             return Ok(());

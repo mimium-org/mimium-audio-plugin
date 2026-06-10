@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 arboard = "3"
 base64 = "0.22"
 clack-plugin = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18" }
-clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18", features = ["audio-ports", "clack-plugin", "gui", "params", "state"] }
+clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "4541f03792635dfdc6be9441a01b786e9b4ccf18", features = ["audio-ports", "clack-plugin", "gui", "params", "state", "timer"] }
 include_dir = "0.7"
 libc = "0.2"
 mimium-lang = "4.1.1"

@@ -52,7 +52,6 @@ const DEFAULT_KNOBS = Array.from({ length: 8 }, (_, index) => ({
 }));
 
 const LOGO_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(logoSvg)}`;
-
 function App() {
   const [source, setSourceText] = useState(DEFAULT_SOURCE);
   const [isDrawerOpen, setIsDrawerOpen] = useState(true);
@@ -78,6 +77,12 @@ function App() {
   const [compileStatus, setCompileStatus] = useState<"idle" | "pending" | "ok" | "error">(
     "idle"
   );
+  const compileStatusRef = useRef<"idle" | "pending" | "ok" | "error">("idle");
+  const lastSentSourceRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    compileStatusRef.current = compileStatus;
+  }, [compileStatus]);
 
   useEffect(() => {
     const editor = monaco.editor.create(document.getElementById(editorContainerId)!, {
@@ -275,12 +280,12 @@ function App() {
       hasInitialStateRef.current = true;
       if (message.ok) {
         setCompileError(null);
-        if (compileStatus === "pending") {
+        if (compileStatusRef.current === "pending") {
           setCompileStatus("ok");
         }
       } else {
         setCompileError(message.message);
-        if (compileStatus === "pending") {
+        if (compileStatusRef.current === "pending") {
           setCompileStatus("error");
         }
       }
@@ -304,7 +309,7 @@ function App() {
       disposable.dispose();
       editor.dispose();
     };
-  }, [compileStatus, editorContainerId]);
+  }, [editorContainerId]);
 
   useEffect(() => {
     if (!hasInitialStateRef.current) {
@@ -317,6 +322,10 @@ function App() {
     }
 
     const timer = window.setTimeout(() => {
+      if (lastSentSourceRef.current === source) {
+        return;
+      }
+      lastSentSourceRef.current = source;
       setSource(source);
     }, 350);
 
@@ -347,6 +356,7 @@ function App() {
   };
 
   const handleCompile = () => {
+    setCompileError(null);
     setCompileStatus("pending");
     compileSource();
   };

@@ -65,6 +65,14 @@ impl<'a> PluginAudioProcessor<'a, MimiumPluginShared, MimiumPluginMainThread<'a>
 
         self.try_swap_runtime();
 
+        if self
+            .shared
+            .pending_host_callback
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.host.request_callback();
+        }
+
         self.input_left_cache.clear();
         self.input_right_cache.clear();
         if let Some(input_port) = audio.input_port(0) {
