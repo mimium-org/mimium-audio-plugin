@@ -61,8 +61,15 @@ jobs:
 
       - name: Install WiX Toolset
         run: |
-          choco install wixtoolset --version=3.14.1 -y
-          Add-Content $env:GITHUB_PATH 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
+          $wix = Get-Command candle.exe -ErrorAction SilentlyContinue
+          if ($null -eq $wix) {
+            choco install wixtoolset -y --no-progress
+          }
+          $wix = Get-Command candle.exe -ErrorAction SilentlyContinue
+          if ($null -eq $wix) {
+            throw 'WiX Toolset (candle.exe) was not found after install.'
+          }
+          Add-Content $env:GITHUB_PATH (Split-Path -Parent $wix.Source)
         shell: pwsh
 
       - name: Determine version
