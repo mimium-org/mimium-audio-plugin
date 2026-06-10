@@ -45,6 +45,17 @@ if ($LASTEXITCODE -ne 0) {
     throw 'heat.exe failed'
 }
 
+# heat.exe may emit 32-bit components even with -platform x64.
+# Mark harvested components explicitly as Win64 to satisfy ICE80 checks.
+[xml]$harvestDoc = Get-Content -Path $harvestWxs
+$ns = New-Object System.Xml.XmlNamespaceManager($harvestDoc.NameTable)
+$ns.AddNamespace('w', 'http://schemas.microsoft.com/wix/2006/wi')
+$components = $harvestDoc.SelectNodes('//w:Component', $ns)
+foreach ($component in $components) {
+    $component.SetAttribute('Win64', 'yes')
+}
+$harvestDoc.Save($harvestWxs)
+
 $candleArgs = @(
     '-nologo'
     "-dProductVersion=$Version"
