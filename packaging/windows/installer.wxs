@@ -15,4 +15,12 @@
       <ComponentGroupRef Id="PluginFiles" />
     </Feature>
   </Product>
+
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="CommonFiles64Folder">
+        <Directory Id="PluginInstallRoot" Name="Mimium Audio Plugin" />
+      </Directory>
+    </Directory>
+  </Fragment>
 </Wix>

@@ -40,7 +40,7 @@ $heat = (Get-Command heat.exe).Source
 $candle = (Get-Command candle.exe).Source
 $light = (Get-Command light.exe).Source
 
-& $heat dir $stageRoot -nologo -gg -srd -cg PluginFiles -dr CommonFilesFolder -var var.StagingRoot -out $harvestWxs
+& $heat dir $stageRoot -nologo -gg -srd -cg PluginFiles -dr PluginInstallRoot -var var.StagingRoot -out $harvestWxs
 if ($LASTEXITCODE -ne 0) {
     throw 'heat.exe failed'
 }
