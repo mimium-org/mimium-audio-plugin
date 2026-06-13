@@ -63,6 +63,7 @@ The installer build workflow is defined in [package-installers.yml](.github/work
 
 - Windows: builds `.msi` and installs into `Common Files/CLAP` and `Common Files/VST3`
 - macOS: builds `.pkg` and installs into `/Library/Audio/Plug-Ins/CLAP`, `/Library/Audio/Plug-Ins/VST3`, and `/Library/Audio/Plug-Ins/Components`
+- On first install, both installers attempt to bootstrap mimium standard libraries into `~/.mimium/lib` if the directory does not exist or is empty (fetched from `mimium-org/mimium-rs` via GitHub API tarball endpoints)
 - The macOS workflow signs when Apple certificates are provided, and runs notarize + staple when notarization secrets are configured
 
 Secrets used for macOS signing and notarization:

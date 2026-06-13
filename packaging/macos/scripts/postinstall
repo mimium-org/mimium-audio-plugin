@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  echo "[mimium postinstall] $1"
+}
+
+is_non_empty_dir() {
+  local dir=$1
+  [[ -d "$dir" ]] && find "$dir" -mindepth 1 -print -quit 2>/dev/null | grep -q .
+}
+
+install_lib_if_missing() {
+  local user=$1
+  local home_dir=$2
+  local lib_dir="$home_dir/.mimium/lib"
+
+  if is_non_empty_dir "$lib_dir"; then
+    log "library already exists at $lib_dir; skipping"
+    return 0
+  fi
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap 'rm -rf "$tmp_dir"' RETURN
+
+  local api_headers=(
+    -H "Accept: application/vnd.github+json"
+    -H "User-Agent: mimium-audio-plugin-installer"
+  )
+
+  local tarball_url
+  tarball_url=$(curl -fsSL "${api_headers[@]}" \
+    "https://api.github.com/repos/mimium-org/mimium-rs/releases/latest" \
+    | sed -n 's/.*"tarball_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1 || true)
+
+  if [[ -z "$tarball_url" ]]; then
+    tarball_url="https://api.github.com/repos/mimium-org/mimium-rs/tarball/main"
+  fi
+
+  local archive_path="$tmp_dir/mimium-rs.tar.gz"
+  local extract_dir="$tmp_dir/extract"
+
+  mkdir -p "$extract_dir"
+  curl -fL "${api_headers[@]}" "$tarball_url" -o "$archive_path"
+  tar -xzf "$archive_path" -C "$extract_dir"
+
+  local source_lib
+  source_lib=$(find "$extract_dir" -type d -path '*/mimium-lang/lib' -print -quit)
+  if [[ -z "$source_lib" ]]; then
+    log "could not locate mimium-lang/lib in downloaded archive"
+    return 0
+  fi
+
+  mkdir -p "$lib_dir"
+  cp -R "$source_lib"/. "$lib_dir"/
+
+  local group
+  group=$(id -gn "$user" 2>/dev/null || echo "$user")
+  chown -R "$user:$group" "$home_dir/.mimium" 2>/dev/null || true
+
+  log "installed mimium library into $lib_dir"
+}
+
+main() {
+  local console_user
+  console_user=$(stat -f '%Su' /dev/console 2>/dev/null || true)
+
+  if [[ -z "$console_user" || "$console_user" == "root" || "$console_user" == "loginwindow" ]]; then
+    log "no console user found; skipping mimium library bootstrap"
+    exit 0
+  fi
+
+  local home_dir
+  home_dir=$(dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+
+  if [[ -z "$home_dir" || ! -d "$home_dir" ]]; then
+    log "failed to resolve home directory for $console_user; skipping"
+    exit 0
+  fi
+
+  install_lib_if_missing "$console_user" "$home_dir"
+}
+
+main "$@"

@@ -7,6 +7,7 @@ repo_root=$(cd -- "$script_dir/../.." && pwd)
 package_dir="$repo_root/target/package/release"
 out_dir="$repo_root/target/installer/macos"
 root_dir="$out_dir/root"
+scripts_dir="$out_dir/scripts"
 pkg_path="$out_dir/Mimium-Audio-Plugin-${version}-macOS.pkg"
 
 find_first() {
@@ -22,12 +23,16 @@ if [[ -z "$clap_path" || -z "$vst3_path" || -z "$au_path" ]]; then
   exit 1
 fi
 
-rm -rf "$root_dir" "$pkg_path"
+rm -rf "$root_dir" "$scripts_dir" "$pkg_path"
 mkdir -p \
   "$root_dir/Library/Audio/Plug-Ins/CLAP" \
   "$root_dir/Library/Audio/Plug-Ins/VST3" \
   "$root_dir/Library/Audio/Plug-Ins/Components" \
+  "$scripts_dir" \
   "$out_dir"
+
+cp "$script_dir/scripts/postinstall" "$scripts_dir/postinstall"
+chmod +x "$scripts_dir/postinstall"
 
 ditto "$clap_path" "$root_dir/Library/Audio/Plug-Ins/CLAP/$(basename "$clap_path")"
 ditto "$vst3_path" "$root_dir/Library/Audio/Plug-Ins/VST3/$(basename "$vst3_path")"
@@ -46,6 +51,7 @@ fi
 
 pkgbuild_args=(
   --root "$root_dir"
+  --scripts "$scripts_dir"
   --identifier org.mimium.mimium-audio-plugin.pkg
   --version "$version"
   --install-location /

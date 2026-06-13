@@ -12,6 +12,7 @@ $packageDir = Join-Path $repoRoot 'target\package\release'
 $outDir = Join-Path $repoRoot 'target\installer\windows'
 $stageRoot = Join-Path $outDir 'root'
 $templateWxs = Join-Path $scriptDir 'installer.wxs'
+$libraryInstallScript = Join-Path $scriptDir 'install-mimium-lib.ps1'
 $harvestWxs = Join-Path $outDir 'harvested.wxs'
 $msiPath = Join-Path $outDir ("Mimium-Audio-Plugin-$Version-Windows.msi")
 
@@ -20,6 +21,7 @@ Remove-Item $harvestWxs -Force -ErrorAction SilentlyContinue
 Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $stageRoot 'CLAP') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stageRoot 'VST3') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stageRoot 'scripts') | Out-Null
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $clapArtifact = Get-ChildItem -Path $packageDir -Filter '*.clap' | Select-Object -First 1
@@ -35,6 +37,7 @@ if (-not $vst3Artifact) {
 
 Copy-Item -Path $clapArtifact.FullName -Destination (Join-Path $stageRoot 'CLAP') -Recurse -Force
 Copy-Item -Path $vst3Artifact.FullName -Destination (Join-Path $stageRoot 'VST3') -Recurse -Force
+Copy-Item -Path $libraryInstallScript -Destination (Join-Path $stageRoot 'scripts') -Force
 
 $heat = (Get-Command heat.exe).Source
 $candle = (Get-Command candle.exe).Source
@@ -47,6 +50,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $candleArgs = @(
     '-nologo'
+    '-ext'
+    'WixUtilExtension'
     "-dProductVersion=$Version"
     "-dStagingRoot=$stageRoot"
     '-out'
@@ -63,7 +68,7 @@ if ($LASTEXITCODE -ne 0) {
 $templateObj = Join-Path $outDir 'installer.wixobj'
 $harvestObj = Join-Path $outDir 'harvested.wixobj'
 
-& $light -nologo -sice:ICE61 -out $msiPath $templateObj $harvestObj
+& $light -nologo -ext WixUtilExtension -sice:ICE61 -out $msiPath $templateObj $harvestObj
 if ($LASTEXITCODE -ne 0) {
     throw 'light.exe failed'
 }

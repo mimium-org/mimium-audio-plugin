@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+  xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Product
     Id="*"
     Name="Mimium Audio Plugin"
@@ -11,6 +12,21 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <CustomAction
+      Id="SetRunInstallMimiumLib"
+      Property="RunInstallMimiumLib"
+      Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[PluginInstallRoot]scripts\install-mimium-lib.ps1&quot;" />
+    <CustomAction
+      Id="RunInstallMimiumLib"
+      BinaryKey="WixCA"
+      DllEntry="WixQuietExec64"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="SetRunInstallMimiumLib" After="InstallFiles">NOT REMOVE</Custom>
+      <Custom Action="RunInstallMimiumLib" After="SetRunInstallMimiumLib">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
     <Feature Id="MainFeature" Title="Mimium Audio Plugin" Level="1">
       <ComponentGroupRef Id="PluginFiles" />
     </Feature>
