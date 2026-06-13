@@ -32,7 +32,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+        shell: powershell
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -70,18 +73,18 @@ jobs:
             throw 'WiX Toolset (candle.exe) was not found after install.'
           }
           Add-Content $env:GITHUB_PATH (Split-Path -Parent $wix.Source)
-        shell: pwsh
+        shell: powershell
 
       - name: Determine version
         id: version
         run: |
           $version = (Select-String -Path plugin/Cargo.toml -Pattern '^version\s*=\s*"(.+)"$').Matches[0].Groups[1].Value
           "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        shell: pwsh
+        shell: powershell
 
       - name: Build MSI installer
         run: ./packaging/windows/build-msi.ps1 -Version ${{ steps.version.outputs.value }}
-        shell: pwsh
+        shell: powershell
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -117,7 +120,10 @@ jobs:
           p12-password: ${{ secrets.APPLE_CERTIFICATES_P12_PASSWORD }}
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+        shell: bash
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
